@@ -1,0 +1,4 @@
+PyQt6
+pyqtgraph
+pyserial
+# nidaqmx optional, only for real NI-DAQ hardware

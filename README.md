@@ -1,69 +1,46 @@
-# monochromator
+# VRS41 Monochromator Controller
 
+Qt6 (PyQt6 + pyqtgraph) GUI for a FAULHABER-driven monochromator.
 
-**_TO PROPERLY RUN THE CODE THESE REQUAIREMENTS MUST BE FULFILLED_**
+## Install
+    python3 -m venv .venv && source .venv/bin/activate
+    pip install -r requirements.txt
 
+## Run
+    python3 main.py
 
-English — Windows setup (step by step)
-What you’ll install (once):
-Python (64-bit) from python.org
-Packages: pyserial, matplotlib, nidaqmx
-Driver: NI-DAQmx (or NI-DAQmx Runtime) for NI data-acquisition devices
-1) Install Python (64-bit)
-Download Python 3.10–3.12 (64-bit) from python.org (Windows installer).
-Run the installer and check “Add Python to PATH”. Keep “tcl/tk and IDLE” enabled (default).
-Verify install: open Command Prompt and run:
-py --version
-You should see something like Python 3.11.x.
-2) Install the required Python packages
-Run these commands in Command Prompt (copy–paste all at once is fine):
-py -m pip install -U pip
-py -m pip install pyserial matplotlib nidaqmx
-pyserial lets the app talk to the motor over COM ports. 
-PyPI
-pyserial.readthedocs.io
-Discussions on Python.org
-matplotlib is used for plotting. 
-Matplotlib
-PyPI
-nidaqmx is the official NI Python API. 
-nidaqmx-python.readthedocs.io
-PyPI
-3) Install the NI-DAQmx driver (needed for nidaqmx)
-Install NI-DAQmx or the NI-DAQmx Runtime from NI.
-The Python nidaqmx package requires this driver to be present. 
-NI Knowledge Center
-PyPI
-Tip: If you don’t use NI hardware on a given PC, you can skip this; but the program will only work fully (DAQ readings) where NI-DAQmx is installed. NI’s docs and user manual are here if needed.
-nidaqmx-python.readthedocs.io
-ni.com
+## Test without hardware (SIM mode)
+Port = `SIM`, click Connect. No motor / NI-DAQ required.
 
+## Backlash / slip calibration
+"Calibrate…" button in BACKLASH section (PS-2600A-style dialog).
 
-**German— Windows setup (step by step)** 
+## Settings persistence
+Almost every entered field is saved to vrs41_settings.json and restored on
+next start (see app_config.DEFAULT_CONFIG for the full list). Restored
+wavelength is a software estimate, not a hardware readback.
 
-1) Python (64-Bit) installieren
-Python 3.10–3.12 (64-Bit) von python.org (Windows-Installer) herunterladen.
-Installer starten und „Add Python to PATH“ anhaken. „tcl/tk and IDLE“ aktiviert lassen (Standard).
-Prüfung: Eingabeaufforderung öffnen und ausführen:
-py --version
-Es sollte z. B. Python 3.11.x erscheinen.
-2) Benötigte Python-Pakete installieren
-In der Eingabeaufforderung:
-py -m pip install -U pip
-py -m pip install pyserial matplotlib nidaqmx
-pyserial für die serielle (COM-)Kommunikation. 
-PyPI
-pyserial.readthedocs.io
-matplotlib für Diagramme. 
-Matplotlib
-nidaqmx ist das offizielle NI-Python-Paket. 
-nidaqmx-python.readthedocs.io
-PyPI
-3) NI-DAQmx-Treiber installieren (erforderlich für nidaqmx)
-NI-DAQmx oder NI-DAQmx Runtime von NI installieren.
-Das Python-Paket nidaqmx benötigt diesen Treiber. 
-NI Knowledge Center
-PyPI
-Hinweis: Ohne NI-Hardware kann man NI-DAQmx weglassen; die DAQ-Funktionen der Software arbeiten jedoch nur auf Systemen mit installiertem NI-DAQmx. Doku/Handbuch siehe hier.
-nidaqmx-python.readthedocs.io
+## Motion ramp / max speed (AC/DEC/SP)
+Confirmed + tuned live at the rig via tune_ramp.py (standalone diagnostic,
+independent of the app — reads GAC/GDEC/GSP, optionally tests new values
+with a small move, never touches SAVE/EEPSAV).
 
+Currently active (device_constants.py, USE_MOTION_RAMP=True):
+  RAMP_AC = 50, RAMP_DEC = 100, RAMP_SP = 10000
+Applied by protocol_faulhaber.init_motor() on every connect (RAM only).
+Previous DEC was 30000 (drive default/factory) — effectively no brake ramp,
+causing an abrupt stop; DEC=100 fixed that.
+
+To re-tune: `python3 tune_ramp.py COM3` (read-only) or
+`python3 tune_ramp.py COM3 --set "ac=.. dec=.. sp=.." --move 2000` (RAM-only
+test with a small move).
+
+## Files
+- `main.py`, `gui_main.py`, `gui_main_tk.py` (Tk reference, unused)
+- `scan_engine.py`, `motion.py`, `protocol_faulhaber.py`, `daq.py`
+- `app_context.py`, `app_config.py`, `device_constants.py`
+- `sim_hardware.py`, `backlash_cal.py`, `tune_ramp.py`
+- `HANDOVER.md` / `BACKLOG.md`
+
+Note: the retired monolith `monochromator_python_code_vrs41.py` is NOT part
+of this package (kept only in the project as historical reference).
