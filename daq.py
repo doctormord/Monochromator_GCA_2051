@@ -34,7 +34,9 @@ import random
 import re
 
 from app_context import state, log, ui_get
-from device_constants import DAQ_SAMPLES_PER_READ, DAQ_SAMPLE_RATE_HZ
+from device_constants import (
+    DAQ_SAMPLES_PER_READ, DAQ_SAMPLE_RATE_HZ, STEPS_PER_NM, INVERT_DIRECTION,
+)
 
 # Optional NI-DAQ: automatically disable if the driver is missing ->
 # read_pmt_voltage() then falls back to the simulator.
@@ -47,6 +49,21 @@ except Exception:
     AcquisitionType = None
     TerminalConfiguration = None
     DAQ_AVAILABLE = False
+
+
+def daq_source_label() -> str:
+    """'NI-DAQ' or 'SIMULATED' -- one place for every UI/export marker.
+
+    WHY THIS EXISTS: when the nidaqmx driver is missing (no NI hardware, wrong
+    OS, driver not installed, device renamed) read_pmt_voltage() silently falls
+    back to _simulated_pmt_voltage(). That simulator deliberately produces a
+    REALISTIC-looking spectrum -- baseline plus emission lines at 486/589/656
+    nm, with noise -- which is exactly what makes it dangerous: a scan recorded
+    without hardware looks like a valid measurement, at plausible wavelengths,
+    with no hint anywhere that it is synthetic. Nothing in the GUI used to say
+    so. Every place that shows or stores a measured value now labels the
+    source through this function."""
+    return "NI-DAQ" if DAQ_AVAILABLE else "SIMULATED"
 
 # Rate-limit for DAQ read-error logging in read_pmt_voltage(). A hardware/driver
 # fault there previously returned 0.0 SILENTLY -> a scan would fill with flat
@@ -98,6 +115,21 @@ def _daq_channel_path():
         pass
     return f"{dev}/{ai}"
 
+def _note_last_pmt(v):
+    """Record the most recent DAQ reading (and its timestamp) in shared state.
+
+    WHY: the GUI's live AI monitor must never open its own NI-DAQ Task while a
+    scan is running -- two threads reserving the same channel makes NI-DAQmx
+    fail. So during a scan the monitor simply displays what the scan itself
+    just measured, which is exactly this value. Costs one dict write per read.
+    """
+    try:
+        state['last_pmt_v'] = float(v)
+        state['last_pmt_t'] = time.time()
+    except Exception:
+        pass
+
+
 def read_pmt_voltage(chan=None, samples=DAQ_SAMPLES_PER_READ, rate=DAQ_SAMPLE_RATE_HZ):
     """Return one averaged voltage using NI-DAQ if available; else simulator.
 
@@ -112,7 +144,9 @@ def read_pmt_voltage(chan=None, samples=DAQ_SAMPLES_PER_READ, rate=DAQ_SAMPLE_RA
             chan = "Dev1/ai1"
 
     if not DAQ_AVAILABLE or nidaqmx is None:
-        return _simulated_pmt_voltage()
+        v = _simulated_pmt_voltage()
+        _note_last_pmt(v)
+        return v
 
     try:
         with nidaqmx.Task() as task:
@@ -124,10 +158,13 @@ def read_pmt_voltage(chan=None, samples=DAQ_SAMPLES_PER_READ, rate=DAQ_SAMPLE_RA
                 task.timing.cfg_samp_clk_timing(int(rate), sample_mode=AcquisitionType.FINITE, samps_per_chan=int(samples))
                 vals = task.read(number_of_samples_per_channel=int(samples))
                 if isinstance(vals, list) and vals:
-                    return float(sum(vals)/len(vals))
-                return float(vals) if isinstance(vals, (int,float)) else 0.0
+                    v = float(sum(vals)/len(vals))
+                else:
+                    v = float(vals) if isinstance(vals, (int, float)) else 0.0
             else:
-                return float(task.read())
+                v = float(task.read())
+            _note_last_pmt(v)
+            return v
     except Exception as e:
         # Previously swallowed silently (return 0.0). Keep the 0.0 return so
         # scan/averaging math never crashes on a transient glitch, but surface
@@ -147,8 +184,8 @@ def _simulated_pmt_voltage() -> float:
     on a Mac, or in SIM mode with the virtual motor). WHY shaped and not flat:
     state['current_nm'] is set to exactly the wavelength being measured at each
     scan step, so an nm-dependent shape produces a RECOGNIZABLE curve while
-    scanning (baseline + a few emission lines: H-beta 486, Na-D 589, H-alpha
-    656 nm) instead of pure noise -- this lets the whole path (plot, averaging,
+    scanning (baseline + a few emission lines: H-beta 486, He I D3 587.5618,
+    Na-D 589, H-alpha 656 nm) instead of pure noise -- this lets the whole path (plot, averaging,
     CSV) be checked meaningfully. Without a known nm it falls back to the old
     noise value. Affects ONLY the simulator; the real NI-DAQ read routine is
     unchanged."""
@@ -157,12 +194,30 @@ def _simulated_pmt_voltage() -> float:
     except Exception:
         return 0.2 + 0.05 * random.random()
 
+    # Follow the OPTICS, not the app's bookkeeping. When the simulated drive
+    # models backlash (device_constants.SIM_BACKLASH_NM) the grating lags the
+    # encoder right after a direction reversal; the app's current_nm tracks the
+    # encoder, so using it directly would make the slack invisible and SIM
+    # would keep reporting a perfect instrument. Asking the fake port for its
+    # current lag makes the simulated spectrum shift exactly as a real one
+    # does, which is what allows backlash compensation, the calibration
+    # routine and scan drift to be debugged without hardware.
+    try:
+        ser = state.get('ser')
+        lag = ser.optical_lag_steps() if hasattr(ser, 'optical_lag_steps') else 0
+        if lag:
+            d_nm = lag / float(STEPS_PER_NM)
+            nm += (-d_nm if INVERT_DIRECTION else d_nm)
+    except Exception:
+        pass
+
     def _gauss(center, width, amp):
         return amp * 2.718281828 ** (-((nm - center) / width) ** 2)
 
     signal = 0.15                      # baseline
     signal += _gauss(486.1, 6.0, 0.45)  # H-beta
-    signal += _gauss(589.3, 8.0, 0.70)  # Na-D
+    signal += _gauss(587.5618, 0.8, 0.75)  # He I D3 -- the rig's reference line
+    signal += _gauss(589.3, 1.0, 0.70)  # Na-D
     signal += _gauss(656.3, 5.0, 1.00)  # H-alpha (reference line for backlash_cal)
     signal += 0.02 * random.random()    # measurement noise
     return signal
@@ -195,7 +250,11 @@ def read_pmt_voltage_avg(samples: int = None, window_sec: float = None):
             total += float(v)
             count += 1
         if count <= 0:
+            state['last_avg_reads'] = 1
             return float(read_pmt_voltage())
+        # Report the MEASURED read count so the GUI can show a real rate
+        # instead of a guessed sample rate (gui_main._update_avg_hint).
+        state['last_avg_reads'] = count
         return total / count
 
     # Otherwise: average a fixed number of samples
@@ -217,7 +276,9 @@ def read_pmt_voltage_avg(samples: int = None, window_sec: float = None):
         total += float(v)
         count += 1
     if count <= 0:
+        state['last_avg_reads'] = 1
         return float(read_pmt_voltage())
+    state['last_avg_reads'] = count
     return total / count
 
 def acquire_measurement(dwell_s: float) -> float:
@@ -230,16 +291,38 @@ def acquire_measurement(dwell_s: float) -> float:
     read_pmt_voltage() and ignored the AVG controls entirely, while only
     do_resume averaged -- that's why AVG looked broken on a normal scan).
 
-    Per-point timing budget (all consumed BEFORE the move to the next point):
+    Per-point timing budget (all consumed BEFORE the move to the next point).
+    The GUI calls dwell_s the "Timebase" -- it is the total time budget for
+    one point, not a "wait afterwards":
 
         |<-- pre-settle -->|<-- averaging window / N samples -->|<-- rest -->|
-        |<---------------------------- dwell_s --------------------------->|
+        |<--------------------------- timebase --------------------------->|
+
+    PRE-SETTLE APPLIES IN BOTH MODES -- it is taken before the mode branch
+    below, so it is a property of the timebase, not of the averaging mode.
 
     Modes (avg_mode_var):
         'samples' : average a FIXED number of DAQ reads (avg_samples_var),
-                    independent of the clock -> constant noise floor per point.
-        'time'    : average continuously for AVG_FRACTION_PCT % of the dwell
-                    left after pre-settle -> averaging time scales with dwell.
+                    independent of the clock -> constant noise floor per
+                    point. The timebase then only acts as a FLOOR on the
+                    per-point duration (leftover time is slept).
+        'time'    : average continuously for AVG_FRACTION_PCT % of the
+                    measurement time that is actually available, i.e. of
+                    (timebase - pre-settle).
+
+    FRACTION SEMANTICS CHANGED (deliberate, user-approved):
+        old:  window = min(dwell - presettle, dwell * frac)
+        new:  window = (dwell - presettle) * frac
+    The old form took the percentage of the FULL timebase and then merely
+    CAPPED it at what was left after pre-settle. Consequence: with
+    timebase 1000 ms and pre-settle 200 ms, anything from 80 % upwards
+    produced the same 800 ms window -- the setting silently stopped having an
+    effect, and where that ceiling sat depended on pre-settle. Now "50 %"
+    always means half of the available measurement time, whatever pre-settle
+    is set to.
+    NOTE FOR DATA COMPARABILITY: at identical settings this changes the
+    averaging window, hence the noise floor. Scans recorded before and after
+    this change are not directly comparable in 'time' mode.
 
     Returns the averaged PMT voltage (float).
     """
@@ -249,14 +332,29 @@ def acquire_measurement(dwell_s: float) -> float:
     if presettle > 0:
         sleep_with_pause(presettle)
 
+    # Measurement time actually available after settling.
+    avail = max(0.0, dwell_s - presettle)
+
     t_meas = time.time()
     if ui_get('avg_mode_var', 'samples') == 'time':
         frac = _get_avg_fraction() / 100.0
-        window = max(0.0, min(dwell_s - presettle, dwell_s * frac))
+        window = max(0.0, avail * frac)
         v = read_pmt_voltage_avg(window_sec=window)
     else:
+        window = None
         v = read_pmt_voltage_avg()
     meas_dur = time.time() - t_meas
+
+    # Expose what actually happened, so the GUI can show the user the real
+    # numbers (window in ms, how many DAQ reads fitted, resulting rate)
+    # instead of a guessed sample rate. Purely informational.
+    try:
+        state['last_avg_window_s'] = window
+        state['last_avg_dur_s'] = meas_dur
+        state['last_avg_avail_s'] = avail
+        state['last_avg_presettle_s'] = presettle
+    except Exception:
+        pass
 
     sleep_with_pause(max(0.0, dwell_s - presettle - meas_dur))
     return float(v)

@@ -37,7 +37,7 @@ import time
 import threading
 from typing import Optional
 
-from app_context import state, log, set_fsm, ui_get, ui_hook
+from app_context import state, log, set_fsm, ui_get, ui_hook, refs
 from device_constants import (
     STEPS_PER_NM, INVERT_DIRECTION, SAFE_AFTER_MOVE,
     POLL_INTERVAL, POS_TOL_STEPS, POS_STABLE_COUNT,
@@ -52,6 +52,7 @@ from device_constants import (
     OST_STATUS_INPUT1, OST_STATUS_INPUT2, OST_STATUS_INPUT3,
     OST_FAULT_MASK, OST_HARD_LIMIT_MASK, OST_INTERNAL_LIMIT_MASK,
     SOFT_LIMIT_MIN_NM, SOFT_LIMIT_MAX_NM, SOFT_LIMIT_MARGIN_NM,
+    FREE_RUN_SP_STEPS_PER_POLL,
 )
 from protocol_faulhaber import (
     send_cmd, read_position, read_position_retry, read_ost, safe_stop,
@@ -68,6 +69,99 @@ def steps_for_delta_nm(delta_nm: float) -> int:
     if INVERT_DIRECTION:
         steps = -steps
     return steps
+
+def steps_to_delta_nm(delta_steps) -> float:
+    """Inverse of steps_for_delta_nm(): raw motor-step delta -> wavelength
+    delta (nm), same INVERT_DIRECTION convention.
+
+    WHERE/WHEN: everything else in this codebase tracks state['current_nm']
+    from the COMMANDED delta (trust the move that was sent), never reads
+    it back from POS. A free-run/continuous scan is the first consumer that
+    polls POS WHILE the motor is moving and needs the REAL measured position
+    converted to nm at each poll -- this is that conversion, kept here next
+    to its forward counterpart rather than duplicated at the call site."""
+    dnm = float(delta_steps) / float(STEPS_PER_NM)
+    if INVERT_DIRECTION:
+        dnm = -dnm
+    return dnm
+
+def estimate_free_run_steps_per_poll(sp_rpm) -> float:
+    """Rough linear interpolation over FREE_RUN_SP_STEPS_PER_POLL
+    (device_constants.py -- measured via probe_move_timing.py, see that
+    table's docstring for the caveats: NOT a physical model, up to ~2x
+    run-to-run variance in the source data).
+
+    Below/above the measured range, this returns the nearest endpoint
+    rather than extrapolating further -- outside [1000, 10000] rpm there
+    is zero measured data for this rig, and pretending to extrapolate a
+    number we have no basis for would be worse than saying 'same as the
+    closest thing we actually measured'."""
+    table = sorted(FREE_RUN_SP_STEPS_PER_POLL)
+    sp_rpm = float(sp_rpm)
+    if sp_rpm <= table[0][0]:
+        return float(table[0][1])
+    if sp_rpm >= table[-1][0]:
+        return float(table[-1][1])
+    for (sp_lo, spp_lo), (sp_hi, spp_hi) in zip(table, table[1:]):
+        if sp_lo <= sp_rpm <= sp_hi:
+            frac = (sp_rpm - sp_lo) / float(sp_hi - sp_lo)
+            return spp_lo + frac * (spp_hi - spp_lo)
+    return float(table[-1][1])  # unreachable, defensive fallback
+
+def estimate_free_run_resolution_nm(sp_rpm) -> float:
+    """Rough estimate of nm between consecutive Free Run samples at the
+    given SP (rpm). See estimate_free_run_steps_per_poll()/
+    FREE_RUN_SP_STEPS_PER_POLL for what this is (and isn't) based on --
+    an order-of-magnitude GUI estimate, not a guarantee. Used by
+    gui_main.py's live info label next to the Free Run speed field."""
+    steps_per_poll = estimate_free_run_steps_per_poll(sp_rpm)
+    return steps_per_poll / float(STEPS_PER_NM)
+
+def set_current_wavelength(known_nm: float) -> bool:
+    """OFFSET calibration: declare that the monochromator is RIGHT NOW sitting
+    at a known wavelength (e.g. a reference lamp line the user has centred),
+    and re-anchor the software's position tracking to it -- WITHOUT moving the
+    motor.
+
+    WHAT IT DOES / WHY: this whole system is purely relative -- there is no
+    absolute position sensor, state['current_nm'] is only ever carried forward
+    by commanded deltas from wherever it was last anchored (restored config or
+    the 500.0 fallback). So if the reference line shows up at the wrong place,
+    the ANCHOR is off, not necessarily the steps/nm scale. This corrects the
+    anchor: it sets state['current_nm'] (and the GUI 'Current λ' field, the
+    source of truth scan_engine reads for the next move's delta) to the known
+    value. Pure re-labelling of the current position -- verifiably correct for
+    a constant offset, and harmless (no motion, nothing else changes).
+
+    WHAT IT IS NOT: this does NOT touch STEPS_PER_NM. If the error GROWS with
+    distance from the anchor (a scale/slope error, not a constant offset), an
+    offset reset alone won't fix it -- that needs a real two-point calibration
+    (measure two known lines, derive steps/nm). That is deliberately NOT done
+    here; see BACKLOG. Do a reset here, then check a second known line: if it's
+    now correct everywhere, it was an offset; if it still drifts, it's scale.
+
+    Returns True on success, False on invalid input.
+    """
+    try:
+        nm = float(known_nm)
+    except Exception:
+        log("[CAL] Set-λ ignored: invalid wavelength.", "error")
+        return False
+    old = state.get('current_nm')
+    state['current_nm'] = nm
+    try:
+        refs['entry_current'].delete(0, "end")
+        refs['entry_current'].insert(0, f"{nm:.3f}")
+    except Exception:
+        pass
+    try:
+        old_txt = f"{float(old):.3f}" if old is not None else "unknown"
+    except Exception:
+        old_txt = "unknown"
+    log(f"[CAL] Current position re-anchored: {old_txt} -> {nm:.3f} nm "
+        f"(offset calibration; motor NOT moved, STEPS_PER_NM unchanged). "
+        f"If a second known line still drifts, that's a scale error -- see BACKLOG.")
+    return True
 
 def timeout_for_nm(delta_nm: float) -> float:
     try:
@@ -236,6 +330,22 @@ def _pos_wait_impl_fallback(target_steps: int, tol_steps: int, stable_polls: int
         # blindly "fixed", because that would activate a never-tested safety
         # check on untested hardware -- a deliberate fix with rig
         # verification, see BACKLOG.
+        #
+        # !! SECOND, INDEPENDENT REASON NOT TO JUST INITIALIZE THE VARIABLES !!
+        # The input logic below is INVERTED for this rig. It computes
+        #     new_edges = (status_bits ^ baseline) & status_bits
+        # i.e. it reacts to an input bit going 0 -> 1 ("became active").
+        # Measured on the rig (three read_faulhaber_config.py runs while
+        # pressing each endstop, cross-checked against the manual's HP
+        # definition, see device_constants.OST_ENDSTOP_ACTIVE_LOW):
+        #     both endstops FREE  -> OST 0x0500 (bit8 AND bit10 SET)
+        #     Input 1 PRESSED     -> OST 0x0400 (bit8 CLEARED)
+        #     Input 3 PRESSED     -> OST 0x0100 (bit10 CLEARED)
+        # An endstop being hit CLEARS its bit. So merely initializing the three
+        # variables would produce a guard that ignores every real endstop hit
+        # and instead aborts the move when a switch is RELEASED. Whoever
+        # activates this must flip the comparison to detect 1 -> 0 first, and
+        # then verify it on the rig by pressing a switch during a slow move.
         try:
             if (time.time() - last_ost) >= 0.10:
                 last_ost = time.time()
@@ -415,7 +525,7 @@ def _get_slip_nm() -> float:
 
 def _update_direction_label():
     """Refresh the small GUI status label showing the currently known
-    'seated' direction, so it's obvious at a glance whether a Referenzfahrt
+    'seated' direction, so it's obvious at a glance whether a Reference Run
     is needed before trusting compensation."""
     try:
         d = state.get('last_move_direction')
@@ -445,7 +555,7 @@ def reversal_compensation_steps(new_direction: int) -> int:
     no-op (extra=0) on every step except the one where direction actually
     flips.
 
-    If no Referenzfahrt has been run yet this session (last_move_direction is
+    If no Reference Run has been run yet this session (last_move_direction is
     still None), this logs a warning and returns 0 -- the move proceeds
     UNCOMPENSATED rather than guessing a direction.
     """
@@ -463,7 +573,7 @@ def reversal_compensation_steps(new_direction: int) -> int:
     _update_direction_label()
     return extra
 
-def reference_run_action():
+def reference_run_action(on_done=None):
     """
     One-shot 'take up the backlash' move, meant to be run once per session
     (after Connect, before the first Goto/Scan). Drives REFERENCE_MOVE_NM nm
@@ -475,6 +585,13 @@ def reference_run_action():
 
     Safe to repeat any time during a session if you want to re-establish a
     known direction state (e.g. after an interrupted move).
+
+    on_done, if given, is called EXACTLY ONCE after the move finishes
+    (success or failure/interruption) as on_done(reached: bool). It is
+    marshalled onto the GUI thread via ui_hook('ui_after', ...) -- same
+    mechanism the rest of the GUI-facing code uses -- so it's safe to open a
+    dialog or touch widgets directly from it. Used by gui_main.py's
+    post-connect "Reference Run? -> confirm current λ" workflow.
     """
     if state["is_scanning"]:
         ui_hook('show_warning', "Busy", "Cannot run reference move while scanning.")
@@ -487,6 +604,7 @@ def reference_run_action():
 
     def _worker():
         set_fsm("MOVING")
+        reached = False
         try:
             ui_hook('set_reference_button_enabled', False)
             init_motor()
@@ -504,6 +622,19 @@ def reference_run_action():
                 # This move DEFINES the known direction state for the session.
                 state['last_move_direction'] = REFERENCE_DIRECTION
                 _update_direction_label()
+                # The reference move is a REAL motor move (REFERENCE_MOVE_NM in
+                # REFERENCE_DIRECTION), not a no-op -- state['current_nm'] and
+                # the GUI 'Current λ' field must move with it, same as every
+                # other successful move in scan_engine.py. Previously neither
+                # was updated here, so state['current_nm']/entry_current
+                # silently drifted by REFERENCE_MOVE_NM off the real position
+                # on every Reference Run, corrupting the next Goto/Scan target.
+                state['current_nm'] = float(state.get('current_nm', 0.0)) + delta_nm
+                try:
+                    refs['entry_current'].delete(0, "end")
+                    refs['entry_current'].insert(0, f"{state['current_nm']:.3f}")
+                except Exception:
+                    pass
                 log(f"[REF] Reference run complete. Direction seated at {REFERENCE_DIRECTION:+d}. Ready.")
             else:
                 log("[REF] Reference run interrupted -- direction state NOT set, repeat before relying on compensation.", "warn")
@@ -516,5 +647,19 @@ def reference_run_action():
                 pass
             if state.get("fsm") == "MOVING":
                 set_fsm("IDLE")
+            # callable() rather than `is not None`: connecting this function
+            # straight to a Qt clicked signal hands on_done the button's
+            # `checked` bool, which is not None but is not callable either.
+            # The call site is fixed, but a wrong value must not be able to
+            # take down the end of a completed move.
+            if on_done is not None and not callable(on_done):
+                log(f"[REF] on_done is not callable ({type(on_done).__name__}); "
+                    f"ignoring it. (Connecting reference_run_action directly to a "
+                    f"Qt signal does this -- use a no-arg lambda.)", "warn")
+            elif on_done is not None:
+                try:
+                    ui_hook('ui_after', lambda: on_done(reached))
+                except Exception as e:
+                    log(f"[REF] on_done callback failed: {e}", "warn")
 
     threading.Thread(target=_worker, daemon=True).start()

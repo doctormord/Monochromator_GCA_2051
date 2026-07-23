@@ -68,6 +68,14 @@ DEFAULT_CONFIG = {
     "scan_step_nm": None,
     "scan_wait_ms": "0",   # dwell, entered/displayed in ms in the GUI
 
+    # Free Run (continuous scan) max speed override, in rpm (SP command).
+    # None = use device_constants.RAMP_SP (the rig-confirmed normal speed).
+    # HARD-CAPPED at RAMP_SP in the GUI/validation, never higher -- that
+    # constant is the value actually verified safe/sane on this rig
+    # (tune_ramp.py), not the drive's raw 30000 manual maximum. This field
+    # can only go SLOWER than normal, never faster.
+    "free_run_sp_rpm": None,
+
     # Move / jog.
     "jog_step_nm": None,
 

@@ -64,17 +64,22 @@ from device_constants import (
     AVG_SAMPLES_DEFAULT, AVG_MODE_DEFAULT, AVG_FRACTION_PCT_DEFAULT,
     PRESETTLE_MS_DEFAULT,
     CAL_CENTER_NM_DEFAULT, CAL_SPAN_NM_DEFAULT, CAL_STEP_NM_DEFAULT,
-    CAL_DWELL_S_DEFAULT,
+    CAL_DWELL_S_DEFAULT, RAMP_SP,
+    AI_MONITOR_ENABLED, AI_MONITOR_HZ, AI_WARN_V, AI_ALARM_V, AI_BAR_MAX_V,
 )
 import app_config
-from protocol_faulhaber import ser_ok, safe_stop, init_motor
-from motion import reference_run_action
+from protocol_faulhaber import (
+    ser_ok, safe_stop, init_motor, drain_stale_serial, read_temperature,
+)
+from motion import reference_run_action, estimate_free_run_resolution_nm, set_current_wavelength
+from daq import read_pmt_voltage, daq_source_label, DAQ_AVAILABLE
 import backlash_cal
 from scan_engine import (
-    goto_wavelength_action, scan_action, pause_action, resume_action,
+    goto_wavelength_action, scan_action, free_run_scan_action, pause_action, resume_action,
     stop_action, jog_minus_action, jog_plus_action, mark_point_action,
     add_scan_to_queue, remove_selected_scan, run_scan_queue_action,
     clear_scan_queue, clear_plot_action, export_active_scan_csv,
+    update_selected_scan,
 )
 
 
@@ -98,7 +103,9 @@ _QSS = f"""
 QWidget {{
     background: {C_BG};
     color: {C_TEXT};
-    font-family: "Segoe UI", "DejaVu Sans", sans-serif;
+    /* Segoe UI is Windows-only; -apple-system/Helvetica Neue cover macOS,
+       DejaVu/Noto cover Linux. Avoids the same alias-table lookup cost. */
+    font-family: "Segoe UI", "-apple-system", "Helvetica Neue", "DejaVu Sans", "Noto Sans", sans-serif;
     font-size: 13px;
 }}
 QLabel#Title {{ font-size: 16px; font-weight: 600; }}
@@ -119,7 +126,10 @@ QLineEdit, QComboBox, QListWidget, QPlainTextEdit {{
     border-radius: 5px; padding: 4px 6px; selection-background-color: {C_ACCENT_D};
 }}
 QLineEdit:focus, QComboBox:focus {{ border: 1px solid {C_ACCENT}; }}
-QPlainTextEdit {{ font-family: "Consolas", "DejaVu Sans Mono", monospace; font-size: 12px; }}
+/* Mono stack covering all three platforms. "Consolas" alone (Windows-only)
+   made Qt on macOS/Linux fall back through its alias tables on every start:
+   qt.qpa.fonts: Populating font family aliases took 56 ms. */
+QPlainTextEdit {{ font-family: "Menlo", "SF Mono", "Consolas", "DejaVu Sans Mono", "Liberation Mono", monospace; font-size: 12px; }}
 QPushButton {{
     background: {C_PANEL2}; border: 1px solid {C_BORDER};
     border-radius: 5px; padding: 6px 12px;
@@ -204,6 +214,17 @@ class _EntryAdapter:
 
     def __init__(self, qle: QtWidgets.QLineEdit, initial: str = ""):
         self._w = qle
+        # If no explicit initial is passed, adopt the widget's CURRENT text as
+        # the shadow's starting value. Without this, a field that was pre-filled
+        # from saved settings (e.g. Step = "0.1" after a restart) kept an EMPTY
+        # shadow until the user edited it, because textChanged only fires on
+        # FUTURE edits -- so get() returned "" and scan validation failed with
+        # "start/end/step must be numbers" until the value was retyped. That was
+        # the "0.1 is shown but Scan won't start; change it to 0.10 or retype
+        # and it works" bug: Start/End got retyped every scan so their shadows
+        # were populated, but Step was usually left at its default and stayed "".
+        if not initial:
+            initial = qle.text()
         self._value = str(initial)
         if initial:
             qle.setText(str(initial))
@@ -337,6 +358,17 @@ class _ListboxAdapter:
     def curselection(self):
         return (self._cur,) if self._cur is not None and self._cur >= 0 else ()
 
+    def selection_set(self, index):
+        """Restore a selection (used after the queue list is rebuilt in place,
+        so 'Update selected' does not silently drop the user's selection)."""
+        try:
+            i = int(index)
+        except Exception:
+            return
+        if 0 <= i < len(self._items):
+            self._cur = i
+            _invoker.post(lambda i=i: self._w.setCurrentRow(i))
+
     def size(self):
         return len(self._items)
 
@@ -398,7 +430,7 @@ class _MessageboxShim:
 
 
 # =====================================================================
-# PLOT-MANAGER (pyqtgraph, gleiche oeffentliche API wie die Tk-Version)
+# PLOT-MANAGER (pyqtgraph, same public API as the Tk version)
 # =====================================================================
 class PlotManager:
     """Multi-scan plot on pyqtgraph, thread-safe.
@@ -506,6 +538,19 @@ class PlotManager:
             self._pi.clear()
             self._jog["scatter"] = pg.ScatterPlotItem(size=7, brush=pg.mkBrush(C_ACCENT))
             self._pi.addItem(self._jog["scatter"])
+            # _pi.clear() also strips the measurement crosshair InfiniteLines,
+            # which were added to this same PlotItem at build time. Without
+            # re-attaching them here the crosshair vanished permanently after a
+            # Clear Plot and only returned on an app restart (the reported bug).
+            # Re-add them (their visibility state is preserved, so they simply
+            # reappear on the next mouse-move over the scope). Guarded because
+            # these module globals are defined just below this class and re-add
+            # of an already-detached item is a no-op.
+            for _ln in (_crosshair_v, _crosshair_h):
+                try:
+                    self._pi.addItem(_ln, ignoreBounds=True)
+                except Exception:
+                    pass
         _invoker.post(do)
 
     def get_points(self, plot_id):
@@ -535,6 +580,13 @@ class CollapsibleSection(QtWidgets.QWidget):
         self._form.setVerticalSpacing(6)
         self._form.setFieldGrowthPolicy(
             QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow)
+        # When the panel gets narrow, wrap the label ABOVE its field instead of
+        # letting the label+field row overflow and clip (the "labels chopped to
+        # 'TION' / fields cut off" the user reported). WrapLongRows keeps them
+        # side-by-side at normal width and only stacks when there isn't room.
+        self._form.setRowWrapPolicy(
+            QtWidgets.QFormLayout.RowWrapPolicy.WrapLongRows)
+        self._form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self._toggle = QtWidgets.QPushButton(("▸ " if collapsed else "▾ ") + title)
         self._toggle.setObjectName("SectionToggle")
@@ -592,6 +644,11 @@ _invoker = _Invoker()
 _window = QtWidgets.QMainWindow()
 _window.setWindowTitle("Monochromator Controller — VRS41")
 _window.resize(1180, 720)
+# Minimum size so the layout can't be squeezed to the point where the right
+# panel's controls get clipped -- below this the panel + plot simply don't
+# both fit. The user's broken screenshot was a ~540px-wide window; this floor
+# keeps that from happening.
+_window.setMinimumSize(900, 560)
 _central = QtWidgets.QWidget()
 _window.setCentralWidget(_central)
 _root_lay = QtWidgets.QVBoxLayout(_central)
@@ -627,9 +684,26 @@ def _mk_readout(cap, accent=False):
 
 _ro_lambda_box, ro_lambda = _mk_readout("CURRENT  λ (nm)", accent=True)
 _ro_state_box, ro_state = _mk_readout("STATE")
-for b in (_ro_lambda_box, _ro_state_box):
+# Crosshair readouts (PS-2600A style): live cursor position over the plot.
+# ro_cursor_nm shows the wavelength under the mouse, ro_cursor_v the plotted
+# intensity/voltage at that x on the active trace (see _on_plot_mouse_moved).
+_ro_cursor_nm_box, ro_cursor_nm = _mk_readout("CURSOR  λ (nm)", accent=True)
+_ro_cursor_v_box, ro_cursor_v = _mk_readout("CURSOR  V")
+for b in (_ro_lambda_box, _ro_state_box, _ro_cursor_nm_box, _ro_cursor_v_box):
     _header.addLayout(b)
-    _header.addSpacing(22)
+    _header.addSpacing(18)
+
+# Emergency stop, top-right after the readouts. Always reachable (not buried
+# in the SCAN section), always enabled while connected -- halt the motor NOW
+# if a scan/free-run misbehaves. Same stop_action() as the SCAN Stop button.
+# Kept compact (no oversized minimum width) so it never squeezes the header
+# readouts or the right-hand panel; a fixed size policy so it doesn't stretch.
+btn_estop = QtWidgets.QPushButton("■ STOP")
+btn_estop.setObjectName("Danger")
+btn_estop.setMinimumHeight(40)
+btn_estop.setFixedWidth(96)
+btn_estop.setToolTip("Emergency stop: halt the motor immediately")
+_header.addWidget(btn_estop)
 _root_lay.addLayout(_header)
 
 
@@ -644,7 +718,33 @@ _plot_item = _plot_widget.getPlotItem()
 _plot_item.setLabel("bottom", "Wavelength", units="nm")
 _plot_item.setLabel("left", "PMT Voltage", units="V")
 _plot_item.showGrid(x=True, y=True, alpha=0.15)
-_left_tabs.addTab(_plot_widget, "Scope")
+# Legend: every scan curve is created with name=<its label>, but without an
+# explicit addLegend() those names were never displayed -- so with several
+# traces on screen there was no way to tell which colour was which scan.
+# (The old tkinter build had this; it was lost in the Qt port.)
+_plot_legend = _plot_item.addLegend(offset=(8, 8), labelTextSize="7pt",
+                                    verSpacing=-6, colCount=1)
+try:
+    _plot_legend.setBrush(pg.mkBrush(20, 26, 34, 200))   # readable on dark bg
+    _plot_legend.setPen(pg.mkPen(C_BORDER))
+    _plot_legend.setLabelTextColor(C_TEXT)
+except Exception:
+    pass
+# Wrap the scope in a container with a thin top toolbar. The "Clear Plot"
+# button lives here now (right on the scope, next to the plot it acts on)
+# instead of buried at the bottom of the EXPORT section where nobody found
+# it. The button itself is created once _btn() exists (see below) and dropped
+# into _scope_toolbar; keeping a reference to the layout lets us do that.
+_scope_wrap = QtWidgets.QWidget()
+_scope_wrap_lay = QtWidgets.QVBoxLayout(_scope_wrap)
+_scope_wrap_lay.setContentsMargins(0, 0, 0, 0)
+_scope_wrap_lay.setSpacing(4)
+_scope_toolbar = QtWidgets.QHBoxLayout()
+_scope_toolbar.setContentsMargins(0, 0, 0, 0)
+_scope_toolbar.addStretch(1)  # push toolbar buttons to the right
+_scope_wrap_lay.addLayout(_scope_toolbar)
+_scope_wrap_lay.addWidget(_plot_widget, 1)
+_left_tabs.addTab(_scope_wrap, "Scope")
 
 console = QtWidgets.QPlainTextEdit()
 console.setReadOnly(True)
@@ -655,13 +755,101 @@ _splitter.addWidget(_left_tabs)
 # PlotManager on the pyqtgraph PlotItem
 plot_mgr = PlotManager(_plot_item)
 
+# ---- Crosshair (PS-2600A style): teal V/H lines that follow the mouse over
+# the plot, with wavelength + intensity shown in the header readouts. Purely
+# a measurement/inspection aid -- reads nothing from hardware, changes no
+# state. The intensity is looked up from the ACTIVE trace's plotted points
+# (nearest x), so it reflects exactly what's on screen. ----
+_crosshair_v = pg.InfiniteLine(angle=90, movable=False,
+                               pen=pg.mkPen(C_ACCENT, width=1, style=Qt.PenStyle.DashLine))
+_crosshair_h = pg.InfiniteLine(angle=0, movable=False,
+                               pen=pg.mkPen(C_ACCENT, width=1, style=Qt.PenStyle.DashLine))
+_crosshair_v.setVisible(False)
+_crosshair_h.setVisible(False)
+_plot_item.addItem(_crosshair_v, ignoreBounds=True)
+_plot_item.addItem(_crosshair_h, ignoreBounds=True)
+
+
+def _nearest_active_trace_y(x_nm):
+    """Intensity/voltage of the ACTIVE trace at the plotted point nearest to
+    x_nm, or None if there's no active trace/points. Reads the PlotManager's
+    shadow lists under its own lock (same thread-safe path as get_points),
+    so it never touches pyqtgraph objects from here."""
+    try:
+        pid = plot_mgr._active_id
+        if not pid:
+            return None
+        with plot_mgr._lock:
+            rec = plot_mgr._plots.get(pid)
+            xs = list(rec.get("x") or []) if rec else []
+            ys = list(rec.get("y") or []) if rec else []
+        if not xs:
+            return None
+        # nearest x (lists are typically monotonic in nm, but don't assume it)
+        best_i = min(range(len(xs)), key=lambda i: abs(xs[i] - x_nm))
+        return ys[best_i]
+    except Exception:
+        return None
+
+
+def _on_plot_mouse_moved(evt):
+    """Mouse-move over the scope: place the crosshair and update the CURSOR
+    readouts. evt is a scene-position (comes from the SignalProxy). Guarded
+    so a stray event outside the view can't raise."""
+    try:
+        pos = evt[0] if isinstance(evt, (tuple, list)) else evt
+        vb = _plot_item.getViewBox()
+        if not _plot_item.sceneBoundingRect().contains(pos):
+            _crosshair_v.setVisible(False)
+            _crosshair_h.setVisible(False)
+            return
+        mp = vb.mapSceneToView(pos)
+        x_nm = float(mp.x())
+        y_val = _nearest_active_trace_y(x_nm)
+        _crosshair_v.setPos(x_nm)
+        _crosshair_v.setVisible(True)
+        if y_val is not None:
+            _crosshair_h.setPos(y_val)
+            _crosshair_h.setVisible(True)
+            ro_cursor_v.setText(f"{y_val:.4f}")
+        else:
+            # no trace to read: still show the vertical wavelength line,
+            # but follow the mouse y for the horizontal one so the cross
+            # is complete, and blank the voltage readout.
+            _crosshair_h.setPos(float(mp.y()))
+            _crosshair_h.setVisible(True)
+            ro_cursor_v.setText("—")
+        ro_cursor_nm.setText(f"{x_nm:.3f}")
+    except Exception:
+        pass
+
+
+# SignalProxy throttles the high-frequency mouse-move signal (rateLimit Hz)
+# so we don't rebuild the readout on every pixel -- standard pyqtgraph
+# crosshair pattern.
+_crosshair_proxy = pg.SignalProxy(_plot_item.scene().sigMouseMoved,
+                                  rateLimit=60, slot=_on_plot_mouse_moved)
+
 # Right side: scroll area with collapsible sections
 _scroll = QtWidgets.QScrollArea()
 _scroll.setWidgetResizable(True)
-_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-_scroll.setMinimumWidth(320)
-_scroll.setMaximumWidth(420)
+# Allow the horizontal scrollbar AS NEEDED instead of forcing it off: when the
+# window gets narrow, hiding it meant the panel content (buttons/fields) was
+# silently clipped off the right edge with no way to reach it (the "buttons cut
+# off / labels chopped" the user saw). AsNeeded keeps it invisible at normal
+# width but lets you reach everything when the window is small.
+_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+# Lower minimum so the panel can shrink to fit a narrow window instead of
+# overflowing it; max keeps it from eating the whole width on a wide window.
+_scroll.setMinimumWidth(300)
+_scroll.setMaximumWidth(440)
 _panel = QtWidgets.QWidget()
+# Hard cap the panel content width so no single wide widget (a long label, a
+# stretched field) can ever blow the panel past what fits -- this was the root
+# cause of the clipped/overflowing controls: one non-wrapping label forced the
+# whole panel to ~490px. With widgetResizable the panel now tracks the
+# viewport width up to this cap and wraps content instead of overflowing.
+_panel.setMaximumWidth(430)
 _panel_lay = QtWidgets.QVBoxLayout(_panel)
 _panel_lay.setContentsMargins(4, 4, 4, 4)
 _panel_lay.setSpacing(2)
@@ -669,9 +857,38 @@ _scroll.setWidget(_panel)
 _splitter.addWidget(_scroll)
 _splitter.setStretchFactor(0, 1)
 _splitter.setStretchFactor(1, 0)
+# Give the splitter a sane initial split so the right panel always gets its
+# ~360px and the plot takes the rest -- without this the splitter can hand the
+# plot too much and squeeze the panel off-screen on first show.
+_splitter.setSizes([760, 360])
+# The plot side may collapse if dragged; the panel side must not (so its
+# controls can never be squeezed to nothing).
+_splitter.setCollapsible(0, True)
+_splitter.setCollapsible(1, False)
 
 
 # --- helper widget factories ---------------------------------------
+def _parse_float_loose(txt):
+    """Parse a user-typed number, accepting BOTH decimal separators.
+
+    WHY: the app's own fields (Start/End/Step/...) are plain QLineEdits parsed
+    with float(), i.e. DOT only. Qt's QInputDialog.getDouble on the other hand
+    is LOCALE-aware, so on a German system it demanded a COMMA -- the user had
+    to type "406,2" in the post-connect dialog but "406.2" everywhere else in
+    the same app. Rather than forcing one separator on the user, every place
+    that reads a wavelength from free text now goes through here and accepts
+    either.
+
+    Accepts "406.2", "406,2", " 406.2 ". Thousands separators are NOT handled
+    (deliberately: "1,234" is ambiguous and a wavelength never needs it -- it
+    is read as 1.234).
+
+    Returns float, or raises ValueError like float() does, so callers keep
+    their existing try/except structure."""
+    s = str(txt).strip().replace(",", ".")
+    return float(s)
+
+
 def _line_edit(initial=""):
     le = QtWidgets.QLineEdit()
     if initial:
@@ -703,17 +920,30 @@ def _persist(key, value):
         pass
 
 
+# Clear Plot lives on the scope toolbar (created above) rather than in EXPORT
+# -- it acts on the plot, so it belongs next to it and is far easier to find
+# there. Wired to clear_plot_action further down (section 9). Note the crosshair
+# is re-attached automatically after a clear now (see PlotManager.clear_all).
+btn_clear_plot = _btn("Clear Plot")
+btn_clear_plot.setToolTip("Clear all traces from the scope (does not touch saved CSV files)")
+_scope_toolbar.addWidget(btn_clear_plot)
+
+
 # =========================== SECTION: CONNECTION ====================
 _sec_conn = CollapsibleSection("CONNECTION")
 entry_port = _line_edit(_saved_settings.get("port") or DEFAULT_PORT)
 entry_baud = _line_edit(str(_saved_settings.get("baud") or DEFAULT_BAUD))
-btn_connect = _btn("Connect", "Primary")
-btn_disconnect = _btn("Disconnect")
+# Single Connect/Disconnect toggle: one button that changes its label and
+# colour with the connection state. Disconnected -> "Connect", teal Primary
+# style (inviting the connect action). Connected -> "Disconnect", red Danger
+# style. The label/style swap happens in _apply_conn_button() (called from
+# set_buttons_connected); the click is dispatched in _on_conn_toggle().
+btn_conn_toggle = _btn("Connect", "Primary")
 _conn_status = QtWidgets.QLabel("● disconnected")
 _conn_status.setStyleSheet(f"color:{C_ERROR};")
 _sec_conn.add_row("Port", entry_port)
 _sec_conn.add_row("Baud", entry_baud)
-_sec_conn.add_widget(_mk_row2(btn_connect, btn_disconnect))
+_sec_conn.add_widget(btn_conn_toggle)
 _sec_conn.add_widget(_conn_status)
 _panel_lay.addWidget(_sec_conn)
 
@@ -745,6 +975,34 @@ _sec_move.add_widget(_mk_row2(btn_jog_minus, btn_jog_plus))
 _sec_move.add_widget(btn_mark_point)
 _panel_lay.addWidget(_sec_move)
 
+# =========================== SECTION: CALIBRATION ==================
+# OFFSET calibration only (for now): the system is purely relative (no
+# absolute position sensor), so if the reference line sits at the wrong
+# wavelength, the ANCHOR is off. This lets the user centre a known line and
+# declare "we are at X nm now" -- re-anchoring current_nm without moving the
+# motor. A true two-point (scale) calibration is deliberately NOT here yet;
+# it needs two measured lines and would change STEPS_PER_NM globally -- see
+# BACKLOG / the hint label below.
+_sec_cal = CollapsibleSection("CALIBRATION", collapsed=True)
+entry_cal_known_nm = _line_edit("")
+btn_set_current = _btn("Set current λ to this value", "Primary")
+_cal_hint = QtWidgets.QLabel(
+    "Offset calibration: drive to a known reference line, centre it, enter its "
+    "true wavelength here and apply — this re-anchors the position WITHOUT "
+    "moving the motor (steps/nm scale unchanged). If a second known line still "
+    "reads wrong afterwards, the error is scale, not offset — that needs a "
+    "two-point calibration (not yet implemented).")
+_cal_hint.setWordWrap(True)
+_cal_hint.setStyleSheet(f"color:{C_MUTED}; font-size:11px;")
+_sec_cal.add_row("Known λ here (nm)", entry_cal_known_nm)
+_sec_cal.add_widget(btn_set_current)
+_sec_cal.add_widget(_cal_hint)
+# NOTE: _sec_cal is added to the panel AFTER the BACKLASH section (see below),
+# so the panel order is ... Backlash / Calibration / DAQ / Export. The build
+# stays here (near MOVE) only because entry_cal_known_nm/btn_set_current are
+# referenced by wiring further down; the visual placement is set by the
+# addWidget() call, not by where the widgets are constructed.
+
 # =========================== SECTION: SCAN =========================
 _sec_scan = CollapsibleSection("SCAN")
 entry_start = _line_edit(_saved_settings.get("scan_start_nm") or "")
@@ -754,17 +1012,131 @@ entry_step = _line_edit(_saved_settings.get("scan_step_nm") or "")
 # keep consuming it as SECONDS unchanged -- see _EntryAdapterMsToSec below,
 # which is the only place the ms<->s conversion happens.
 entry_wait = _line_edit(_saved_settings.get("scan_wait_ms") or "0")
+entry_wait.setToolTip(
+    "Timebase: the TOTAL time budget for one scan point, in ms.\n"
+    "Split as:  pre-settle  ->  averaging  ->  idle remainder.\n"
+    "Formerly labelled 'Wait / dwell', which suggested it was a pause AFTER "
+    "the measurement; it is actually the whole per-point budget that "
+    "pre-settle and averaging are taken out of.")
+
+# Created here (not down in the AVERAGING section where it used to live)
+# because the SCAN grid below places it directly under Timebase -- widgets
+# must exist before addWidget().
+entry_presettle = _line_edit(str(_saved_settings.get("presettle_ms") or PRESETTLE_MS_DEFAULT))
+entry_presettle.setToolTip(
+    "Dead time after arriving at a point, BEFORE any measurement, so "
+    "mechanics and signal can settle.\n"
+    "Subtracted from the Timebase, and it applies in BOTH averaging modes "
+    "(samples and time).")
 btn_scan = _btn("Start Scan", "Primary")
+btn_free_run = _btn("Free Run Scan (continuous)")
 btn_pause = _btn("Pause")
 btn_resume = _btn("Resume")
 btn_stop = _btn("Stop", "Danger")
 btn_swap_start_end = _btn("⇅ Swap Start / End")
-_sec_scan.add_row("Start (nm)", entry_start)
-_sec_scan.add_row("End (nm)", entry_end)
-_sec_scan.add_widget(btn_swap_start_end)
-_sec_scan.add_row("Step (nm)", entry_step)
-_sec_scan.add_row("Wait / dwell (ms)", entry_wait)
-_sec_scan.add_widget(btn_scan)
+# Free Run speed override (SP, rpm). Hard-capped at RAMP_SP (device_
+# constants.py -- the rig-confirmed normal speed) in _clamp_free_run_sp()
+# below; this field can only slow the sweep down, never speed it up past
+# what's actually been verified safe on this rig.
+_saved_free_run_sp = _saved_settings.get("free_run_sp_rpm")
+try:
+    _saved_free_run_sp = max(1, min(int(_saved_free_run_sp), RAMP_SP)) if _saved_free_run_sp else None
+except Exception:
+    _saved_free_run_sp = None
+entry_free_run_sp = _line_edit(str(_saved_free_run_sp if _saved_free_run_sp else RAMP_SP))
+# Last VALID Free Run speed, used as the fallback when the field is emptied or
+# contains garbage (see _on_free_run_sp_edited). Kept separate from the entry
+# adapter on purpose: the adapter's shadow mirrors textChanged, so it is
+# already empty by the time editingFinished fires on a cleared field.
+_last_valid_free_run_sp = [int(_saved_free_run_sp if _saved_free_run_sp else RAMP_SP)]
+_free_run_est = QtWidgets.QLabel("Est. resolution: —")
+_free_run_est.setWordWrap(True)
+_free_run_est.setStyleSheet(f"color:{C_MUTED}; font-size:11px;")
+
+
+def _update_free_run_estimate():
+    """Live info label: rough estimate of nm-between-samples + point count
+    for the currently entered Free Run speed/range. Purely informational,
+    never used for validation/clamping (that happens independently in
+    _on_free_run_sp_edited / scan_engine.validate_free_run_inputs).
+    Numbers come from motion.estimate_free_run_resolution_nm(), which
+    interpolates device_constants.FREE_RUN_SP_STEPS_PER_POLL -- real
+    probe_move_timing.py measurements, not a guessed formula. See that
+    table's docstring for why this is an order-of-magnitude estimate
+    (up to ~2x measured run-to-run variance), not a precise prediction."""
+    try:
+        sp = int(float(entry_free_run_sp.text()))
+    except Exception:
+        sp = RAMP_SP
+    sp_clamped = max(1, min(sp, RAMP_SP))
+    try:
+        res_nm = estimate_free_run_resolution_nm(sp_clamped)
+    except Exception:
+        _free_run_est.setText("Est. resolution: —")
+        return
+    try:
+        s = float(entry_start.text()); e = float(entry_end.text())
+        span = abs(e - s)
+        n_points = int(span / res_nm) if res_nm > 0 else 0
+        _free_run_est.setText(
+            f"Est. @ {sp_clamped} rpm: ~{res_nm:.4f} nm/point, ~{n_points} pts "
+            f"over {span:.3f} nm (rough estimate, ±2x -- probe_move_timing.py)")
+    except Exception:
+        _free_run_est.setText(
+            f"Est. @ {sp_clamped} rpm: ~{res_nm:.4f} nm/point "
+            f"(rough estimate, ±2x -- probe_move_timing.py)")
+
+
+entry_free_run_sp.textChanged.connect(lambda _t: _update_free_run_estimate())
+entry_start.textChanged.connect(lambda _t: _update_free_run_estimate())
+entry_end.textChanged.connect(lambda _t: _update_free_run_estimate())
+_update_free_run_estimate()
+
+# --- Start / End / Step / Wait in one aligned grid, with the Swap button
+# tucked into a middle column BETWEEN the labels and the Start/End fields,
+# spanning both of those rows. That replaces the old full-width Swap button
+# below the fields -- it saves a row and keeps all four fields on one aligned
+# column. Step and Wait sit in the same grid so they line up with Start/End. ---
+btn_swap_start_end.setText("⇅")  # compact: full description is on the tooltip
+btn_swap_start_end.setToolTip("Swap Start and End so the next scan runs the opposite direction")
+_scan_grid_w = QtWidgets.QWidget()
+_scan_grid = QtWidgets.QGridLayout(_scan_grid_w)
+_scan_grid.setContentsMargins(0, 0, 0, 0)
+_scan_grid.setHorizontalSpacing(6)
+_scan_grid.setVerticalSpacing(6)
+_scan_grid.addWidget(QtWidgets.QLabel("Start (nm)"), 0, 0)
+_scan_grid.addWidget(QtWidgets.QLabel("End (nm)"), 1, 0)
+_scan_grid.addWidget(QtWidgets.QLabel("Step (nm)"), 2, 0)
+_scan_grid.addWidget(QtWidgets.QLabel("Timebase (ms)"), 3, 0)
+_scan_grid.addWidget(btn_swap_start_end, 0, 1, 2, 1)  # col 1, rows 0-1 (Start+End)
+_scan_grid.addWidget(entry_start, 0, 2)
+_scan_grid.addWidget(entry_end, 1, 2)
+_scan_grid.addWidget(entry_step, 2, 2)
+_scan_grid.addWidget(entry_wait, 3, 2)
+# Pre-settle sits directly under Timebase because it is SUBTRACTED from it:
+# it is dead time after arriving at a point, before anything is measured, and
+# it applies in BOTH averaging modes. Keeping it in the collapsed AVERAGING
+# section made it look like an averaging-only option and hid the fact that it
+# eats into the timebase.
+_scan_grid.addWidget(QtWidgets.QLabel("Pre-settle (ms)"), 4, 0)
+_scan_grid.addWidget(entry_presettle, 4, 2)
+_scan_grid.setColumnStretch(0, 0)
+_scan_grid.setColumnStretch(1, 0)
+_scan_grid.setColumnStretch(2, 1)  # fields take the remaining width
+_sec_scan.add_widget(_scan_grid_w)
+
+_sec_scan.add_widget(btn_scan)       # Start Scan
+_sec_scan.add_widget(btn_free_run)   # Free Run Scan -- directly under Start Scan
+# The long Free Run explanation used to be an always-visible label that didn't
+# fit the narrow panel; it's preserved verbatim here as the button's tooltip.
+btn_free_run.setToolTip(
+    f"Free Run: ONE continuous move Start→End, raw POS+DAQ polling "
+    f"(~20 Hz measured), no averaging, no Pause. Step/Wait not used. "
+    f"Speed capped at {RAMP_SP} rpm (device_constants.RAMP_SP, the "
+    f"rig-confirmed normal speed) -- can only be set slower, not faster.")
+# Free Run speed field + live estimate go directly under the Free Run button.
+_sec_scan.add_row("Free Run speed (SP, rpm)", entry_free_run_sp)
+_sec_scan.add_widget(_free_run_est)
 _sec_scan.add_widget(_mk_row2(btn_pause, btn_resume))
 _sec_scan.add_widget(btn_stop)
 _panel_lay.addWidget(_sec_scan)
@@ -776,11 +1148,23 @@ _avg_mode_combo = QtWidgets.QComboBox()
 _avg_mode_combo.addItems(["samples", "time"])
 _avg_mode_combo.setCurrentText(str(_saved_settings.get("avg_mode") or AVG_MODE_DEFAULT))
 entry_avg_fraction = _line_edit(str(_saved_settings.get("avg_fraction_pct") or AVG_FRACTION_PCT_DEFAULT))
-entry_presettle = _line_edit(str(_saved_settings.get("presettle_ms") or PRESETTLE_MS_DEFAULT))
 _sec_avg.add_row("Avg samples (N)", entry_avg_samples)
 _sec_avg.add_row("Avg mode", _avg_mode_combo)
 _sec_avg.add_row("Avg fraction (%)", entry_avg_fraction)
-_sec_avg.add_row("Pre-settle (ms)", entry_presettle)
+# Live explanation of what the percentage currently MEANS in milliseconds.
+# Without it the field is abstract: "50 %" of what, and how much averaging is
+# that actually? Recomputed from the real Timebase/Pre-settle fields, and
+# after a scan point has been measured it also reports how many DAQ reads
+# fitted into the window and the resulting rate (from daq.acquire_measurement's
+# telemetry) instead of a guessed number.
+_avg_hint = QtWidgets.QLabel("")
+_avg_hint.setWordWrap(True)
+_avg_hint.setStyleSheet(f"color:{C_MUTED}; font-size:11px;")
+_sec_avg.add_widget(_avg_hint)
+# Pre-settle row moved to the SCAN section (directly under Timebase) -- it is
+# subtracted from the timebase and applies to both averaging modes, so it
+# belongs next to the budget it consumes, not inside a collapsed AVERAGING
+# panel.
 _panel_lay.addWidget(_sec_avg)
 
 # =========================== SECTION: QUEUE ========================
@@ -791,9 +1175,19 @@ btn_add_queue = _btn("Add from fields")
 btn_remove_queue = _btn("Remove selected")
 btn_run_queue = _btn("Run queue")
 btn_clear_queue = _btn("Clear queue")
+# Overwrites the selected entry with the current field values -- each queue
+# entry carries its own acquisition settings now, so without this you would
+# have to delete and re-add an entry just to change its averaging.
+btn_update_queue = _btn("Update selected")
+btn_update_queue.setToolTip(
+    "Overwrite the selected queue entry with the values currently in the "
+    "Scan and Averaging fields (wavelength range, timebase, pre-settle and "
+    "averaging mode/samples/fraction).")
+queue_listbox.setMaximumHeight(150)
 _sec_queue.add_widget(queue_listbox)
-_sec_queue.add_widget(_mk_row2(btn_add_queue, btn_remove_queue))
-_sec_queue.add_widget(_mk_row2(btn_run_queue, btn_clear_queue))
+_sec_queue.add_widget(_mk_row2(btn_add_queue, btn_update_queue))
+_sec_queue.add_widget(_mk_row2(btn_remove_queue, btn_clear_queue))
+_sec_queue.add_widget(btn_run_queue)
 _panel_lay.addWidget(_sec_queue)
 
 # =========================== SECTION: BACKLASH =====================
@@ -813,6 +1207,10 @@ _sec_bl.add_widget(btn_calibrate)
 _sec_bl.add_widget(lbl_direction_state)
 _panel_lay.addWidget(_sec_bl)
 
+# CALIBRATION goes here in the panel (after BACKLASH, before DAQ) per the
+# requested order. The section itself was built up near MOVE (see above).
+_panel_lay.addWidget(_sec_cal)
+
 # =========================== SECTION: DAQ ==========================
 _sec_daq = CollapsibleSection("DAQ", collapsed=True)
 entry_daq_dev = _line_edit(_saved_settings.get("daq_dev") or state.get("daq_dev", "Dev1"))
@@ -831,13 +1229,13 @@ entry_export_dir = _line_edit(_saved_settings.get("export_dir") or os.path.expan
 btn_browse = _btn("Browse…")
 entry_pattern = _line_edit(_saved_settings.get("export_pattern") or "scan_{date}_{time}_{start}-{end}nm_{mode}.csv")
 btn_save_now = _btn("Save CSV now")
-btn_clear_plot = _btn("Clear Plot")
+# btn_clear_plot moved out of EXPORT to the scope toolbar (created just after
+# the _btn() factory, above) -- it was too hard to find down here.
 _sec_exp.add_widget(_chk_autosave)
 _sec_exp.add_row("Folder", entry_export_dir)
 _sec_exp.add_widget(btn_browse)
 _sec_exp.add_row("Pattern", entry_pattern)
 _sec_exp.add_widget(btn_save_now)
-_sec_exp.add_widget(btn_clear_plot)
 _panel_lay.addWidget(_sec_exp)
 
 _panel_lay.addStretch(1)
@@ -848,9 +1246,181 @@ _status = _window.statusBar()
 _lbl_fsm = QtWidgets.QLabel("State: IDLE")
 _lbl_conn = QtWidgets.QLabel("Status: disconnected")
 _lbl_slip = QtWidgets.QLabel("Slip: —")
-for w in (_lbl_fsm, _lbl_conn, _lbl_slip):
-    _status.addWidget(w)
-    _status.addWidget(QtWidgets.QLabel("  |  "))
+# Drive housing temperature (TEM). Refreshed slowly and ONLY while idle -- see
+# _refresh_temperature(). Tooltip spells out what the number is, because
+# "housing" is not "winding": the drive derives coil/MOSFET temperature from
+# this reading plus its current measurement via an internal thermal model, and
+# that model (not this value) trips the overtemperature cut-out.
+_lbl_temp = QtWidgets.QLabel("Temp: —")
+_lbl_temp.setToolTip(
+    "Drive housing temperature (TEM). This unit is an integrated motor+"
+    "controller (GTYP 'CS-BX4'), so it tracks the motor housing -- but the "
+    "winding runs hotter; the drive models coil temperature internally for "
+    "its overtemperature cut-out. Polled every 15 s while idle only, never "
+    "during a move or scan.")
+# ---- Live analog-input monitor (AI) ----
+# Always-on readout of the DAQ input so the PMT/HV can be adjusted WITHOUT
+# starting a scan. Text value + colour-coded bar + max-hold.
+# Thresholds and full scale come from device_constants (AI_WARN_V/AI_ALARM_V/
+# AI_BAR_MAX_V) so they can be changed without touching GUI code.
+_lbl_ai = QtWidgets.QLabel("AI: —")   # prefix set by _apply_ai_value
+_lbl_ai.setMinimumWidth(150)
+_ai_bar = QtWidgets.QProgressBar()
+_ai_bar.setRange(0, 1000)          # 0.1 % resolution; value scaled below
+_ai_bar.setValue(0)
+_ai_bar.setTextVisible(False)
+_ai_bar.setFixedWidth(120)
+_ai_bar.setFixedHeight(12)
+_lbl_ai_max = QtWidgets.QLabel("max —")
+_btn_ai_reset = QtWidgets.QPushButton("Reset max")
+_btn_ai_reset.setFixedHeight(20)
+_ai_max_v = [None]        # max-hold, reset by the button
+_ai_tip = (f"Live analog input ({{chan}}). Green < {AI_WARN_V:g} V, "
+           f"yellow {AI_WARN_V:g}-{AI_ALARM_V:g} V, red >= {AI_ALARM_V:g} V; "
+           f"bar full scale {AI_BAR_MAX_V:g} V "
+           f"(device_constants.AI_WARN_V / AI_ALARM_V / AI_BAR_MAX_V).\n"
+           f"Polled at {AI_MONITOR_HZ:g} Hz while IDLE only. During a scan it "
+           f"shows the value the scan itself just measured -- opening a second "
+           f"NI-DAQ task on the same channel would fail.")
+for _w in (_lbl_ai, _ai_bar, _lbl_ai_max):
+    _w.setToolTip(_ai_tip.replace("{chan}", "DAQ AI"))
+
+
+def _ai_colour(v):
+    """Bar/text colour for a voltage, per the configured thresholds."""
+    if v is None:
+        return C_MUTED
+    if v >= AI_ALARM_V:
+        return C_ERROR
+    if v >= AI_WARN_V:
+        return "#d29922"      # amber
+    return C_OK
+
+
+# Prefix for the AI readout. With no NI driver present read_pmt_voltage()
+# silently returns SIMULATED data that looks like a real spectrum, so the
+# readout has to say so -- otherwise a bench session with no hardware, or a
+# rig session where the driver failed to load, looks exactly like a valid
+# measurement. See daq.daq_source_label().
+_AI_PREFIX = "AI" if DAQ_AVAILABLE else "AI (SIM)"
+
+
+def _apply_ai_value(v):
+    """Update the AI readout widgets (GUI thread). v is volts or None."""
+    if v is None:
+        _lbl_ai.setText(f"{_AI_PREFIX}: —")
+        _ai_bar.setValue(0)
+        return
+    if _ai_max_v[0] is None or v > _ai_max_v[0]:
+        _ai_max_v[0] = v
+    col = _ai_colour(v)
+    _lbl_ai.setText(f"{_AI_PREFIX}: <b><span style='color:{col}'>{v:.4f} V</span></b>")
+    frac = 0.0 if AI_BAR_MAX_V <= 0 else max(0.0, min(1.0, v / float(AI_BAR_MAX_V)))
+    _ai_bar.setValue(int(frac * 1000))
+    _ai_bar.setStyleSheet(
+        f"QProgressBar{{background:{C_BG};border:1px solid #30363d;"
+        f"border-radius:3px;}}"
+        f"QProgressBar::chunk{{background:{col};border-radius:2px;}}")
+    _lbl_ai_max.setText(f"max {_ai_max_v[0]:.4f} V")
+
+
+def _reset_ai_max():
+    _ai_max_v[0] = None
+    _lbl_ai_max.setText("max —")
+
+
+_btn_ai_reset.clicked.connect(_reset_ai_max)
+
+
+def _refresh_ai():
+    """Refresh the live AI readout.
+
+    TWO PATHS, and the distinction matters for the hardware:
+      * scan/move running -> do NOT touch the DAQ. Display
+        state['last_pmt_v'], which the scan's own read just wrote
+        (daq._note_last_pmt). Opening a second NI-DAQ task on a channel that
+        the scan thread has reserved fails with a resource error, so the
+        monitor must never compete for it.
+      * idle -> actively read, in a worker thread (an NI-DAQ read creates and
+        tears down a Task and is far too slow for the GUI thread).
+    """
+    if not AI_MONITOR_ENABLED:
+        return
+    if state.get("is_scanning") or state.get("fsm", "IDLE") != "IDLE":
+        v = state.get("last_pmt_v")
+        _apply_ai_value(None if v is None else float(v))
+        return
+
+    def worker():
+        try:
+            v = float(read_pmt_voltage())
+        except Exception:
+            v = None
+        _invoker.post(lambda: _apply_ai_value(v))
+    threading.Thread(target=worker, daemon=True).start()
+
+
+if not DAQ_AVAILABLE:
+    log("[DAQ] nidaqmx driver not available -- PMT voltages are SIMULATED, "
+        "not measured. Scans and CSV exports will be marked accordingly.", "warn")
+else:
+    log("[DAQ] nidaqmx driver present -- real measurements.")
+
+_ai_timer = QTimer()
+_ai_timer.timeout.connect(_refresh_ai)
+_ai_timer.start(int(1000.0 / max(0.5, AI_MONITOR_HZ)))
+
+# ---- Status-bar assembly ----
+# Built as GROUPS, not as one flat list with a separator after every widget.
+# The flat version put a "|" after the progress bar and after the button too,
+# left a stray empty cell, and let the button keep its default (oversized)
+# height, so the footer looked ragged and the last item was clipped.
+def _sep():
+    """Thin vertical rule between status-bar groups."""
+    f = QtWidgets.QFrame()
+    f.setFrameShape(QtWidgets.QFrame.Shape.VLine)
+    f.setFixedHeight(14)
+    f.setStyleSheet(f"color:{C_BORDER};")
+    return f
+
+
+_STATUS_LBL_QSS = (f"color:{C_MUTED}; font-size:11px;")
+_STATUS_VAL_QSS = (f"color:{C_TEXT}; font-size:11px;")
+
+for _w in (_lbl_fsm, _lbl_conn, _lbl_slip, _lbl_temp):
+    _w.setStyleSheet(_STATUS_VAL_QSS)
+
+# AI group: label + bar + max + reset, laid out tightly in one container so
+# the status bar treats it as a single item and spacing stays even.
+_lbl_ai.setStyleSheet(_STATUS_VAL_QSS)
+_lbl_ai.setMinimumWidth(0)
+_lbl_ai_max.setStyleSheet(_STATUS_LBL_QSS)
+_ai_bar.setFixedSize(90, 10)
+_btn_ai_reset.setStyleSheet(
+    f"QPushButton{{background:transparent;border:1px solid {C_BORDER};"
+    f"border-radius:3px;color:{C_MUTED};font-size:10px;padding:1px 6px;}}"
+    f"QPushButton:hover{{color:{C_TEXT};border-color:{C_MUTED};}}")
+_btn_ai_reset.setFixedHeight(18)
+_btn_ai_reset.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
+_btn_ai_reset.setToolTip("Reset the max-hold value")
+
+_ai_group = QtWidgets.QWidget()
+_ai_lay = QtWidgets.QHBoxLayout(_ai_group)
+_ai_lay.setContentsMargins(0, 0, 0, 0)
+_ai_lay.setSpacing(6)
+for _w in (_lbl_ai, _ai_bar, _lbl_ai_max, _btn_ai_reset):
+    _ai_lay.addWidget(_w)
+
+_status.setStyleSheet(
+    f"QStatusBar{{background:{C_BG};border-top:1px solid {C_BORDER};}}"
+    f"QStatusBar::item{{border:none;}}")   # kill Qt's default per-item frames
+_status.setSizeGripEnabled(False)
+
+for _i, _w in enumerate((_lbl_fsm, _lbl_conn, _lbl_slip, _lbl_temp, _ai_group)):
+    if _i:
+        _status.addWidget(_sep())
+    _status.addWidget(_w)
+_status.addWidget(QtWidgets.QWidget(), 1)   # trailing stretch, no dangling rule
 
 
 # =====================================================================
@@ -878,21 +1448,54 @@ def _html_escape(s):
 
 
 # =====================================================================
-# BUTTON-ZUSTANDS-HOOKS (identische Logik wie die Tk-Version)
+# BUTTON-STATE HOOKS (identical logic to the Tk version)
 # =====================================================================
+def _apply_conn_button(connected: bool):
+    """Set the single Connect/Disconnect toggle's label + colour for the given
+    state. Connected -> "Disconnect", red Danger style; disconnected ->
+    "Connect", teal Primary style. Re-polishes the widget so the objectName
+    style-swap actually takes effect under the global stylesheet. Marshalled
+    onto the GUI thread (may be called from set_buttons_connected via a worker
+    thread). Purely cosmetic -- the click dispatch in _on_conn_toggle() reads
+    state['connected'], not the label."""
+    def do():
+        btn_conn_toggle.setText("Disconnect" if connected else "Connect")
+        btn_conn_toggle.setObjectName("Danger" if connected else "Primary")
+        # Force Qt to re-evaluate the stylesheet for the new objectName.
+        btn_conn_toggle.style().unpolish(btn_conn_toggle)
+        btn_conn_toggle.style().polish(btn_conn_toggle)
+        btn_conn_toggle.update()
+    _invoker.post(do)
+
+
+def _on_conn_toggle():
+    """Click handler for the single Connect/Disconnect toggle (GUI thread).
+    Dispatches to on_disconnect() when currently connected, on_connect()
+    otherwise. Uses the authoritative state flag, not the button label."""
+    if state.get("connected"):
+        on_disconnect()
+    else:
+        on_connect()
+
+
 def set_buttons_connected(connected: bool):
     """Enable/disable buttons depending on connection state. WHERE/WHEN: called
     from on_connect/on_disconnect and via ui_hook from scan_engine (also from
     worker threads -> the _ButtonAdapter marshals internally)."""
-    a_btn_connect.configure(state=("disabled" if connected else "normal"))
-    a_btn_disconnect.configure(state=("normal" if connected else "disabled"))
+    # Single toggle: always clickable while idle (you can either connect or
+    # disconnect), its label/colour reflect the state via _apply_conn_button.
+    a_btn_conn.configure(state="normal")
+    _apply_conn_button(connected)
     a_btn_goto.configure(state=("normal" if connected else "disabled"))
     a_btn_scan.configure(state=("normal" if connected else "disabled"))
+    a_btn_free_run.configure(state=("normal" if connected else "disabled"))
     a_btn_pause.configure(state="disabled")
     a_btn_resume.configure(state="disabled")
     a_btn_stop.configure(state=("normal" if connected else "disabled"))
+    a_btn_estop.configure(state=("normal" if connected else "disabled"))
     for a in (a_btn_jog_minus, a_btn_jog_plus, a_btn_mark_point,
-              a_btn_add_queue, a_btn_remove_queue, a_btn_run_queue, a_btn_clear_queue):
+              a_btn_add_queue, a_btn_remove_queue, a_btn_run_queue, a_btn_clear_queue,
+              a_btn_update_queue):
         a.configure(state=("normal" if connected else "disabled"))
     # live status indicator
     def do():
@@ -907,11 +1510,13 @@ def set_buttons_scanning(scanning: bool):
     WHEN: via ui_hook from scan_engine (worker thread)."""
     if scanning:
         a_btn_goto.configure(state="disabled")
-        a_btn_disconnect.configure(state="disabled")
+        a_btn_conn.configure(state="disabled")  # can't disconnect mid-scan
         a_btn_scan.configure(state="disabled")
+        a_btn_free_run.configure(state="disabled")
         a_btn_pause.configure(state="normal")
         a_btn_resume.configure(state="disabled")
         a_btn_stop.configure(state="normal")
+        a_btn_estop.configure(state="normal")
         for a in (a_btn_jog_minus, a_btn_jog_plus, a_btn_mark_point, a_btn_run_queue):
             a.configure(state="disabled")
     else:
@@ -941,7 +1546,7 @@ def on_connect():
             set_fsm("IDLE")
             log("[SIM] Virtual FAULHABER connected — no hardware. DAQ uses simulator.")
             init_motor()
-            log("[OK] Motor initialized (EN, HP0, V0)")
+            log("[OK] Motor initialized (EN, V0, ANSW, ramp).")
         except Exception as e:
             log(f"[ERROR] SIM connect failed: {e}", "error")
             state["ser"] = None
@@ -956,14 +1561,70 @@ def on_connect():
         set_buttons_connected(True)
         set_fsm("IDLE")
         log(f"[OK] Connected {port} @ {baud} baud")
+        drain_stale_serial(ser)
         init_motor()
-        log("[OK] Motor initialized (EN, HP0, V0)")
+        log("[OK] Motor initialized (EN, V0, ANSW, ramp).")
+        _prompt_reference_run_then_lambda()
     except Exception as e:
         log(f"[ERROR] Could not open {port}: {e}", "error")
         state["ser"] = None
         state["connected"] = False
         set_buttons_connected(False)
         set_fsm("IDLE")
+
+
+def _prompt_current_lambda():
+    """Ask the operator to confirm/correct the wavelength currently shown on
+    the monochromator's OWN (mechanical) readout, and re-anchor
+    state['current_nm'] to it via motion.set_current_wavelength() -- the same
+    offset-calibration setter as the CALIBRATION section's 'Set current λ to
+    this value'. Catches drift from a previous session or a manual nudge of
+    the monochromator while it was disconnected. Cancel = leave untouched."""
+    try:
+        current_default = float(a_current.get())
+    except Exception:
+        current_default = float(state.get('current_nm', 500.0))
+    # getText + _parse_float_loose instead of QInputDialog.getDouble: getDouble
+    # is LOCALE-bound, so on a German system it accepted only a COMMA while
+    # every other field in this app is parsed with float() and needs a DOT --
+    # the user had to type "406,2" here and "406.2" everywhere else. This path
+    # accepts both and re-prompts instead of silently doing nothing on a typo.
+    while True:
+        txt, ok = QtWidgets.QInputDialog.getText(
+            _window, "Confirm current wavelength",
+            "What wavelength (nm) does the monochromator's own mechanical readout "
+            "show right now?\n\nOK re-anchors the tracked position to this value "
+            "(no motor movement). Cancel leaves it as-is.",
+            text=f"{current_default:.3f}")
+        if not ok:
+            return
+        try:
+            val = _parse_float_loose(txt)
+        except Exception:
+            a_messagebox.showwarning(
+                "Confirm current wavelength",
+                "Please enter a number, e.g. 406.2 (a comma also works).")
+            continue
+        set_current_wavelength(val)
+        return
+
+
+def _prompt_reference_run_then_lambda():
+    """Post-connect workflow (real hardware only -- SIM has no physical dial
+    to confirm against, and this would block the many headless SIM tests):
+    ask whether to run the Reference Run now (recommended once per session,
+    before the first Goto/Scan -- seats the backlash direction), then --
+    whether or not it was run -- ask the operator to confirm the current
+    wavelength. Reference Run itself runs in a background thread; the λ
+    prompt is chained via its on_done callback so it only appears AFTER the
+    move actually finishes, not immediately after the Yes click."""
+    if a_messagebox.askyesno(
+        "Reference Run",
+        "Run Reference Run now?\n\nSeats the backlash direction -- recommended "
+        "once per session, before the first Goto/Scan."):
+        reference_run_action(on_done=lambda reached: _prompt_current_lambda())
+    else:
+        _prompt_current_lambda()
 
 
 def on_disconnect():
@@ -1041,15 +1702,23 @@ a_start     = _EntryAdapter(entry_start)
 a_end       = _EntryAdapter(entry_end)
 a_step      = _EntryAdapter(entry_step)
 a_wait      = _EntryAdapterMsToSec(entry_wait)
-a_port      = _EntryAdapter(entry_port, DEFAULT_PORT)
-a_baud      = _EntryAdapter(entry_baud, str(DEFAULT_BAUD))
-a_jog_step  = _EntryAdapter(entry_jog_step, "0.5")
+# NO explicit `initial` for any field that was ALREADY built from the saved
+# settings above. _EntryAdapter overwrites the widget with whatever initial it
+# is handed, so passing a hardcoded default here silently threw the loaded
+# value away -- the settings file said avg_samples=16 / avg_fraction_pct=42
+# while the fields came up showing the constants 8 and 100, every session.
+# With no initial the adapter adopts the widget's current text, which is the
+# value loaded from the JSON.
+a_port      = _EntryAdapter(entry_port)
+a_baud      = _EntryAdapter(entry_baud)
+a_jog_step  = _EntryAdapter(entry_jog_step)
+a_free_run_sp = _EntryAdapter(entry_free_run_sp)
 
 # 3) Var adapters (StringVar-like) for ui_get + internal use.
-a_avg_samples = _EntryAdapter(entry_avg_samples, str(AVG_SAMPLES_DEFAULT))
-a_avg_fraction = _EntryAdapter(entry_avg_fraction, str(AVG_FRACTION_PCT_DEFAULT))
-a_presettle   = _EntryAdapter(entry_presettle, str(PRESETTLE_MS_DEFAULT))
-a_slip        = _EntryAdapter(entry_slip, str(_saved_settings.get("backlash_slip_nm", 0.30)))
+a_avg_samples = _EntryAdapter(entry_avg_samples)
+a_avg_fraction = _EntryAdapter(entry_avg_fraction)
+a_presettle   = _EntryAdapter(entry_presettle)
+a_slip        = _EntryAdapter(entry_slip)
 
 a_avg_mode = _VarAdapter(str(AVG_MODE_DEFAULT), _avg_mode_combo.setCurrentText)
 _avg_mode_combo.currentTextChanged.connect(a_avg_mode.update)
@@ -1077,17 +1746,25 @@ _daq_ai_combo.currentTextChanged.connect(_sync_daq_ai)
 state["daq_ai"] = _daq_ai_combo.currentText()
 
 # 4) Button adapters (configure(state=...) onto setEnabled).
-a_btn_connect     = _ButtonAdapter(btn_connect)
-a_btn_disconnect  = _ButtonAdapter(btn_disconnect)
+# Single Connect/Disconnect toggle button -> one adapter. The old
+# a_btn_connect / a_btn_disconnect names are kept as ALIASES so existing
+# references (set_buttons_*, refs['btn_disconnect'], scan_engine's goto lock)
+# keep working -- they all now enable/disable the one toggle.
+a_btn_conn        = _ButtonAdapter(btn_conn_toggle)
+a_btn_connect     = a_btn_conn
+a_btn_disconnect  = a_btn_conn
 a_btn_goto        = _ButtonAdapter(btn_goto)
 a_btn_scan        = _ButtonAdapter(btn_scan)
+a_btn_free_run    = _ButtonAdapter(btn_free_run)
 a_btn_pause       = _ButtonAdapter(btn_pause)
 a_btn_resume      = _ButtonAdapter(btn_resume)
 a_btn_stop        = _ButtonAdapter(btn_stop)
+a_btn_estop       = _ButtonAdapter(btn_estop)
 a_btn_jog_minus   = _ButtonAdapter(btn_jog_minus)
 a_btn_jog_plus    = _ButtonAdapter(btn_jog_plus)
 a_btn_mark_point  = _ButtonAdapter(btn_mark_point)
 a_btn_add_queue   = _ButtonAdapter(btn_add_queue)
+a_btn_update_queue = _ButtonAdapter(btn_update_queue)
 a_btn_remove_queue = _ButtonAdapter(btn_remove_queue)
 a_btn_run_queue   = _ButtonAdapter(btn_run_queue)
 a_btn_clear_queue = _ButtonAdapter(btn_clear_queue)
@@ -1109,15 +1786,20 @@ refs.update({
     "entry_current": a_current, "entry_goto": a_goto,
     "entry_start": a_start, "entry_end": a_end,
     "entry_step": a_step, "entry_wait": a_wait,
+    # Raw (millisecond) view of the timebase field. refs['entry_wait'] is a
+    # ms->seconds adapter; the queue needs the value as displayed.
+    "entry_wait_raw": _EntryAdapter(entry_wait),
+    "entry_presettle": a_presettle, "avg_fraction_var": a_avg_fraction,
     "avg_mode_var": a_avg_mode, "avg_samples_var": a_avg_samples,
     "jog_step_var": a_jog_step, "autosave_csv_var": a_autosave,
     "export_dir_var": a_export_dir, "pattern_var": a_pattern,
     "slip_nm_var": a_slip, "queue_listbox": a_queue,
+    "free_run_sp_var": a_free_run_sp,
     "btn_add_queue": a_btn_add_queue, "btn_clear_queue": a_btn_clear_queue,
     "btn_disconnect": a_btn_disconnect, "btn_goto": a_btn_goto,
     "btn_pause": a_btn_pause, "btn_remove_queue": a_btn_remove_queue,
     "btn_resume": a_btn_resume, "btn_run_queue": a_btn_run_queue,
-    "btn_scan": a_btn_scan, "btn_stop": a_btn_stop,
+    "btn_scan": a_btn_scan, "btn_free_run": a_btn_free_run, "btn_stop": a_btn_stop,
     "messagebox": a_messagebox, "plot_mgr": plot_mgr,
 })
 
@@ -1152,6 +1834,14 @@ class CalibrationDialog(QtWidgets.QDialog):
         self.setWindowTitle("Slip / Backlash — Calibration")
         self.setModal(False)
         self.resize(680, 560)
+        # Apply the app theme EXPLICITLY to this dialog. app.setStyleSheet()
+        # is supposed to cascade to every widget, but a QDialog is its own
+        # top-level window and in practice ended up with light/default field
+        # and plot backgrounds here (visible in the rig screenshot: input
+        # boxes and the mini plot both rendered pale against the dark app).
+        # Setting it on the dialog removes the dependency on that cascade.
+        self.setStyleSheet(_QSS)
+        self.setAutoFillBackground(True)
         self._measured = None
         self._ux = []; self._uy = []; self._dx = []; self._dy = []
 
@@ -1181,7 +1871,14 @@ class CalibrationDialog(QtWidgets.QDialog):
         lay.addWidget(form_box)
 
         # live plot (up = teal, down = amber)
-        self._plot = pg.PlotWidget()
+        # Background/foreground set on the instance, not left to pyqtgraph's
+        # global config: the global default is applied at import time and the
+        # dialog's plot came out light-themed while the main scope was dark.
+        self._plot = pg.PlotWidget(background=C_BG)
+        self._plot.getPlotItem().getAxis("bottom").setPen(pg.mkPen(C_BORDER))
+        self._plot.getPlotItem().getAxis("left").setPen(pg.mkPen(C_BORDER))
+        self._plot.getPlotItem().getAxis("bottom").setTextPen(pg.mkPen(C_MUTED))
+        self._plot.getPlotItem().getAxis("left").setTextPen(pg.mkPen(C_MUTED))
         self._plot.getPlotItem().setLabel("bottom", "Wavelength", units="nm")
         self._plot.getPlotItem().setLabel("left", "Signal", units="V")
         self._plot.getPlotItem().showGrid(x=True, y=True, alpha=0.15)
@@ -1318,27 +2015,98 @@ def _open_cal_dialog():
 
 
 # 9) Connect buttons to actions.
-btn_connect.clicked.connect(on_connect)
-btn_disconnect.clicked.connect(on_disconnect)
+btn_conn_toggle.clicked.connect(_on_conn_toggle)
 btn_goto.clicked.connect(goto_wavelength_action)
 btn_scan.clicked.connect(scan_action)
+btn_free_run.clicked.connect(free_run_scan_action)
 btn_pause.clicked.connect(pause_action)
 btn_resume.clicked.connect(resume_action)
 btn_stop.clicked.connect(stop_action)
+btn_estop.clicked.connect(stop_action)
 btn_jog_minus.clicked.connect(jog_minus_action)
 btn_jog_plus.clicked.connect(jog_plus_action)
 btn_mark_point.clicked.connect(mark_point_action)
 btn_add_queue.clicked.connect(add_scan_to_queue)
+btn_update_queue.clicked.connect(update_selected_scan)
 btn_remove_queue.clicked.connect(remove_selected_scan)
 btn_run_queue.clicked.connect(run_scan_queue_action)
 btn_clear_queue.clicked.connect(clear_scan_queue)
 btn_clear_plot.clicked.connect(clear_plot_action)
 btn_save_now.clicked.connect(lambda: export_active_scan_csv())
-btn_reference_run.clicked.connect(reference_run_action)
+# NOT `connect(reference_run_action)`: Qt's clicked signal emits the button's
+# `checked` bool, and PyQt passes it to any slot that accepts an argument.
+# reference_run_action(on_done=None) accepts one, so the bool landed in
+# on_done -- which then failed at the end of the move with
+# "[GUI] marshalled call failed: 'bool' object is not callable". The move
+# itself ran fine, only the completion callback blew up, which is why it
+# looked like a cosmetic message rather than a wiring bug.
+btn_reference_run.clicked.connect(lambda: reference_run_action())
 btn_calibrate.clicked.connect(_open_cal_dialog)
+
+
+def _on_set_current_lambda():
+    """Offset-calibration button: re-anchor current_nm to the entered known
+    wavelength (no motor move). Persists the new value straight away so a
+    restart keeps the corrected anchor, and refreshes the last-saved-nm box
+    so _refresh_readouts doesn't immediately re-persist a stale value."""
+    txt = entry_cal_known_nm.text().strip()
+    if not txt:
+        a_messagebox.showwarning("Calibration", "Enter the known wavelength first.")
+        return
+    try:
+        nm = _parse_float_loose(txt)
+    except Exception:
+        a_messagebox.showerror("Calibration", "Invalid wavelength.")
+        return
+    if set_current_wavelength(nm):
+        try:
+            _persist("last_current_nm", nm)
+            _last_saved_nm[0] = nm
+        except Exception:
+            pass
+
+
+btn_set_current.clicked.connect(_on_set_current_lambda)
 btn_browse.clicked.connect(_browse_export_dir)
 entry_slip.editingFinished.connect(_on_slip_edited)
 btn_swap_start_end.clicked.connect(_on_swap_start_end)
+
+
+def _on_free_run_sp_edited():
+    """Clamp the Free Run speed field to [1, RAMP_SP] on every edit --
+    RAMP_SP (device_constants.py) is the rig-confirmed normal speed, this
+    field may only go SLOWER, never faster, regardless of what the user
+    types. Rewrites the field with the clamped value so what's displayed is
+    always what will actually be sent.
+
+    INVALID/EMPTY INPUT FALLS BACK TO THE LAST VALID VALUE, NOT TO RAMP_SP.
+    This used to fall back to RAMP_SP, i.e. to the MAXIMUM speed. Because
+    editingFinished also fires on focus loss, merely clicking into the field,
+    clearing it and clicking away silently rewrote it to full speed -- the
+    user's next sweep then ran up to 10x faster than the one they had set up,
+    with no warning beyond the missing override line in the log. Falling back
+    to the previous value keeps an accidental edit from becoming a speed
+    change; a deliberate speed change still needs a valid number.
+
+    NOTE: the last valid value is held in _last_valid_free_run_sp, NOT read
+    back from the adapter -- the adapter's shadow follows textChanged, so by
+    the time this runs on an emptied field the shadow is already ""."""
+    try:
+        val = int(float(entry_free_run_sp.text()))
+    except Exception:
+        val = _last_valid_free_run_sp[0]
+        log(f"[FREE RUN] Speed field was empty/invalid -- kept {val} rpm "
+            f"(NOT reset to the {RAMP_SP} rpm maximum).", "warn")
+    clamped = max(1, min(val, RAMP_SP))
+    if clamped != val:
+        log(f"[FREE RUN] Speed {val} rpm exceeds the configured limit "
+            f"({RAMP_SP} rpm, device_constants.RAMP_SP) -- clamped to {clamped}.", "warn")
+    _last_valid_free_run_sp[0] = clamped
+    a_free_run_sp.delete(0, "end"); a_free_run_sp.insert(0, str(clamped))
+    _persist("free_run_sp_rpm", clamped)
+
+
+entry_free_run_sp.editingFinished.connect(_on_free_run_sp_edited)
 
 # Persist every remaining user-entered field on change (see
 # app_config.DEFAULT_CONFIG for the full key list). QLineEdit -> editingFinished
@@ -1363,9 +2131,41 @@ _chk_autosave.stateChanged.connect(lambda s: _persist("autosave_csv", bool(s)))
 entry_daq_dev.editingFinished.connect(lambda: _persist("daq_dev", entry_daq_dev.text()))
 _daq_ai_combo.currentTextChanged.connect(lambda t: _persist("daq_ai", t))
 
+def _persist_all_fields():
+    """Write EVERY persistent field to the settings file.
+
+    WHY: each field persists itself on `editingFinished`, which only fires on
+    focus loss or Enter. Typing a value and closing the window straight away
+    therefore lost it -- most visibly for the averaging settings, which are
+    often the last thing touched before starting a measurement. Called on
+    close so what is on screen is what comes back next session."""
+    pairs = [
+        ("port", entry_port), ("baud", entry_baud),
+        ("scan_start_nm", entry_start), ("scan_end_nm", entry_end),
+        ("scan_step_nm", entry_step), ("scan_wait_ms", entry_wait),
+        ("presettle_ms", entry_presettle),
+        ("avg_samples", entry_avg_samples), ("avg_fraction_pct", entry_avg_fraction),
+        ("free_run_sp_rpm", entry_free_run_sp), ("jog_step_nm", entry_jog_step),
+        ("export_dir", entry_export_dir), ("export_pattern", entry_pattern),
+        ("daq_dev", entry_daq_dev), ("slip_nm", entry_slip),
+    ]
+    for key, w in pairs:
+        try:
+            _persist(key, w.text())
+        except Exception:
+            pass
+    try:
+        _persist("avg_mode", _avg_mode_combo.currentText())
+        _persist("daq_ai", _daq_ai_combo.currentText())
+        _persist("autosave_csv", bool(_chk_autosave.isChecked()))
+    except Exception:
+        pass
+
+
 # Intercept window close.
 _orig_close = _window.closeEvent
 def _close_event(ev):
+    _persist_all_fields()
     on_close()
     ev.accept()
 _window.closeEvent = _close_event
@@ -1375,6 +2175,67 @@ _window.closeEvent = _close_event
 # LIVE-READOUT-/STATUS-REFRESH
 # =====================================================================
 _last_saved_nm = [None]  # mutable box so the closure below can update it
+
+
+def _update_avg_hint():
+    """Spell out, in milliseconds, what the current averaging settings mean.
+
+    WHY: 'Avg fraction 50 %' is abstract -- 50 % of what, and how much
+    averaging time is that? This turns the settings into the numbers the user
+    actually cares about, recomputed live from the Timebase and Pre-settle
+    fields. Once a point has actually been measured it additionally reports
+    the MEASURED read count and rate from daq.acquire_measurement's telemetry
+    (state['last_avg_*']) rather than a guessed sample rate.
+
+    Pure display; touches no hardware. Runs on the GUI thread from the 250 ms
+    readout timer."""
+    try:
+        timebase_ms = float(entry_wait.text() or 0)
+    except Exception:
+        timebase_ms = 0.0
+    try:
+        presettle_ms = float(entry_presettle.text() or 0)
+    except Exception:
+        presettle_ms = 0.0
+    presettle_ms = max(0.0, min(presettle_ms, timebase_ms))
+    avail_ms = max(0.0, timebase_ms - presettle_ms)
+    mode = _avg_mode_combo.currentText()
+
+    if mode == "time":
+        try:
+            frac = float(entry_avg_fraction.text() or 0)
+        except Exception:
+            frac = 0.0
+        frac = max(0.0, min(100.0, frac))
+        window_ms = avail_ms * frac / 100.0
+        idle_ms = max(0.0, avail_ms - window_ms)
+        txt = (f"{timebase_ms:.0f} ms timebase = {presettle_ms:.0f} ms pre-settle "
+               f"+ {avail_ms:.0f} ms available. "
+               f"{frac:.0f} % of that = <b>{window_ms:.0f} ms averaging</b>, "
+               f"{idle_ms:.0f} ms idle.")
+    else:
+        try:
+            n = int(float(entry_avg_samples.text() or 1))
+        except Exception:
+            n = 1
+        txt = (f"{timebase_ms:.0f} ms timebase = {presettle_ms:.0f} ms pre-settle "
+               f"+ {avail_ms:.0f} ms available. Mode 'samples': "
+               f"<b>{n} DAQ reads</b> (fraction is ignored), remainder idle.")
+
+    # Measured reality from the last acquired point, if there is one.
+    try:
+        w = state.get('last_avg_window_s')
+        d = state.get('last_avg_dur_s')
+        if d and d > 0:
+            n_reads = state.get('last_avg_reads')
+            if n_reads:
+                txt += (f"<br>Last point: {d*1000:.0f} ms, {n_reads} reads "
+                        f"({n_reads/d:.1f} Hz).")
+            else:
+                txt += f"<br>Last point measured in {d*1000:.0f} ms."
+    except Exception:
+        pass
+    _avg_hint.setText(txt)
 
 
 def _refresh_readouts():
@@ -1395,11 +2256,50 @@ def _refresh_readouts():
     fsm = state.get("fsm", "IDLE")
     ro_state.setText(fsm)
     _lbl_fsm.setText(f"State: {fsm}")
+    try:
+        _update_avg_hint()
+    except Exception:
+        pass
 
 
 _ro_timer = QTimer()
 _ro_timer.timeout.connect(_refresh_readouts)
 _ro_timer.start(250)
+
+
+def _refresh_temperature():
+    """Update the status-bar housing-temperature readout (TEM).
+
+    WHEN: own slow timer, every 15 s, and ONLY while connected AND fully idle
+    (no scan, no move, FSM == IDLE). Deliberately kept off the 250 ms readout
+    timer: TEM costs a real serial round-trip on the same single-lock port
+    that POS polling uses, and the Free Run / wait loops are already the
+    measured bottleneck at ~19-20 Hz (see probe_move_timing.py). Injecting an
+    extra query mid-move would steal poll slots from position tracking, so it
+    simply doesn't run then -- the value goes stale-but-labelled rather than
+    disturbing a scan.
+
+    Runs in a worker thread because it touches the serial port; the label
+    update is marshalled back onto the GUI thread."""
+    if not state.get("connected"):
+        _lbl_temp.setText("Temp: —")
+        return
+    if state.get("is_scanning") or state.get("fsm", "IDLE") != "IDLE":
+        return  # leave the last value standing; do not touch the port
+    def worker():
+        try:
+            t = read_temperature()
+        except Exception:
+            t = None
+        def do():
+            _lbl_temp.setText(f"Temp: {t} °C" if t is not None else "Temp: —")
+        _invoker.post(do)
+    threading.Thread(target=worker, daemon=True).start()
+
+
+_temp_timer = QTimer()
+_temp_timer.timeout.connect(_refresh_temperature)
+_temp_timer.start(15000)
 
 
 # =====================================================================

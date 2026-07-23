@@ -82,6 +82,19 @@ def _move_rel_nm(delta_nm: float) -> bool:
         safe_stop()
     if ok:
         state["current_nm"] = float(state.get("current_nm", 0.0)) + float(delta_nm)
+        # Keep the GUI 'Current λ' field in sync -- scan_engine reads THIS
+        # field (not state['current_nm']) as the source of truth for the next
+        # goto/scan delta calculation (refs['entry_current'].get() or
+        # state['current_nm']). Without this, every calibration sweep leaves
+        # entry_current stale, and the NEXT Goto/Scan after closing the
+        # calibration dialog silently targets the wrong absolute wavelength
+        # (off by whatever net distance the calibration moved). Same pattern
+        # as scan_engine.py's goto/scan/jog moves.
+        try:
+            refs['entry_current'].delete(0, "end")
+            refs['entry_current'].insert(0, f"{state['current_nm']:.3f}")
+        except Exception:
+            pass
     return ok
 
 

@@ -1,5 +1,22 @@
 {
   "backlash_slip_nm": 0.09074040411223905,
-  "last_current_nm": 586.5620000000018,
-  "jog_step_nm": "0.01"
+  "last_current_nm": 600.0499999999818,
+  "jog_step_nm": "0.5",
+  "port": "SIM",
+  "scan_start_nm": "580",
+  "scan_end_nm": "600",
+  "scan_step_nm": "0.05",
+  "free_run_sp_rpm": 10,
+  "autosave_csv": false,
+  "avg_samples": "10",
+  "avg_mode": "samples",
+  "baud": "9600",
+  "scan_wait_ms": "0",
+  "presettle_ms": "0",
+  "avg_fraction_pct": "50",
+  "export_dir": "/root/scans",
+  "export_pattern": "scan_{date}_{time}_{start}-{end}nm_{mode}.csv",
+  "daq_dev": "Dev1",
+  "slip_nm": "0.09074040411223905",
+  "daq_ai": "ai1"
 }

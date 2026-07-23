@@ -42,6 +42,40 @@ INVERT_DIRECTION = True
 # successful wait_until_position().
 SAFE_AFTER_MOVE = True
 
+# --- "HP0" is NOT a motion command (rig + manual finding) ----------------
+# The app has sent "HP0" since the monolith days alongside EN/V0, evidently in
+# the belief that it was a "halt/hold position" style safety command. It is
+# not. In FAULHABER manual DE_7000_00029 (sections 3.5.3.1 / 7.1.5) HP has
+# exactly ONE meaning, verified by searching every occurrence in the manual:
+#
+#     HP <Bitmaske>  = Hard Polarity -- which edge/level of each LIMIT SWITCH
+#                      input counts as valid.
+#                      bit=1: rising edge / HIGH level valid
+#                      bit=0: falling edge / LOW level valid
+#
+# So "HP0" writes the limit-switch polarity mask to 0 for ALL five inputs --
+# a configuration write to the safety hardware, executed on every connect,
+# every stop and every recover. It is RAM-only here (the app never SAVEs), but
+# it silently overrides whatever polarity the drive was commissioned with
+# until the next power-cycle.
+#
+# Consequence if the drive's stored polarity is NOT 0: the hard-blocking
+# limit switches are armed on the WRONG level for the rest of the session,
+# i.e. the drive thinks a switch is engaged while it is free and vice versa.
+# That is a plausible (NOT yet proven) contributor to a move running past an
+# end -- see BACKLOG.
+#
+# DEFAULT False: stop writing limit-switch configuration the app never meant
+# to write. Nothing motion-related is lost -- HP is not a motion command.
+# Set True to restore the historical behaviour verbatim.
+#
+# HOW TO FIND OUT WHAT THE DRIVE ACTUALLY WANTS (one clean experiment):
+# power-cycle the controller and run read_faulhaber_config.py BEFORE starting
+# the app. The IOC/HP line then shows the EEPROM value. If it is 00000 the
+# app's HP0 was a harmless no-op all along; if it is anything else, the app
+# has been flipping the endstop polarity every session.
+SEND_LEGACY_HP0 = False
+
 
 # =====================================================================
 # SERIAL CONNECTION (defaults for the GUI Port/Baud fields)
@@ -56,6 +90,59 @@ RESYNC_ON_TIMEOUT = True
 # Short pause after flushing a write, so the controller can "catch its
 # breath" before the next query arrives.
 WRITE_SETTLE_S = 0.01  # s
+
+# --- Answer mode (ANSW) sent by protocol_faulhaber.init_motor() -----------
+# ANSW decode (from FAULHABER manual DE_7000_00029, same table as
+# read_faulhaber_config.py):
+#   0 = silent      -- no command acknowledgments, no unsolicited/async replies
+#   1 = async replies
+#   2 = async replies + command acknowledgments
+#   3 = debug
+# We send ANSW0 (silent): the whole protocol layer already assumes the drive
+# never volunteers anything, and silent mode is what makes that true.
+# IMPORTANT CONSEQUENCE, and the reason NO_REPLY_COMMANDS below exists: in
+# silent mode SET commands (EN/LR/M/AC/...) are NOT acknowledged at all. Any
+# code that waits for a reply after them waits for the full serial timeout,
+# every single time. Set to None to send no ANSW command at all (leave the
+# drive in whatever mode it is currently in).
+# NOTE: ANSW is a RAM setting here (this app never SAVEs/EEPSAVs), so it
+# persists on the drive until it is power-cycled -- which is why a mode change
+# made in one session is still active in the next one.
+MOTOR_ANSW_MODE = 0
+
+# Commands the drive does NOT reply to in silent mode (ANSW0) -- matched on
+# the LETTER PREFIX of the command, so "LR-180882" matches "LR", "AC50"
+# matches "AC", and so on. send_cmd() writes these fire-and-forget and returns
+# immediately instead of blocking for a reply that will never arrive.
+#
+# WHY: with MOTOR_ANSW_MODE = 0 every one of these previously burned
+# timeout (1.0 s) + resync probe (~0.2 s) ~= 1.2 s of pure dead waiting, and a
+# single Go To sends about a dozen of them -> ~14 s of delay per move, plus a
+# wall of misleading "[RESYNC] Timed out" lines for behaviour that is entirely
+# correct and expected in silent mode. This is the "No-Reply-Kommandoset in
+# send_cmd" item from BACKLOG P1; the rig log that identified exactly which
+# commands stay silent is what it was waiting for.
+#
+# QUERY commands (POS, OST, GAC, GDEC, GSP, GMOD, ...) are deliberately NOT in
+# this set -- they DO answer in silent mode (confirmed on the rig: POS/OST
+# replies came back normally while every set command timed out), so they keep
+# the normal write-then-read path including RESYNC on a genuine timeout.
+NO_REPLY_COMMANDS = frozenset({
+    "EN",     # enable drive
+    "DI",     # disable drive
+    "ST",     # stop
+    "HP",     # Hard Polarity -- limit-switch polarity bitmask (NOT a motion
+              # command; see SEND_LEGACY_HP0 above)
+    "V",      # e.g. V0 -- velocity setpoint
+    "M",      # start move
+    "LR",     # load relative target
+    "LA",     # load absolute target
+    "AC",     # acceleration ramp
+    "DEC",    # deceleration ramp
+    "SP",     # speed setpoint
+    "ANSW",   # answer mode itself
+    "HO",     # set home / zero position
+})
 
 # --- Currently UNUSED (found during extraction, referenced only at their
 #     own definition site). Not deleted, only flagged. ---
@@ -74,7 +161,50 @@ POLL_INTERVAL = 0.05  # s
 
 # Short read timeout for serial poll traffic (POS queries etc.), so that
 # stop/pause stay responsive even if a single query happens to hang.
-POLL_TIMEOUT = 0.10  # s
+#
+# RAISED 0.10 -> 0.25 after the 2026-07-23 rig free-run log. Evidence: during
+# a fast sweep the drive returned POS FRAGMENTS ('1', '103862' where the real
+# position was a 7-8 digit number). Fragments mean the reply was still in
+# flight when the app moved on -- i.e. the drive was answering LATER than the
+# read window allowed, not failing to answer. Waiting a bit longer for a
+# complete reply is strictly better than orphaning it and then having its
+# leftover digits show up as the "answer" to the next query.
+# NEEDS A RIG COMPARISON: run the same free run twice (same speed) before and
+# after and compare the outlier count and the point count. If outliers persist
+# unchanged, the cause is not reply latency and this should be reverted rather
+# than raised further.
+POLL_TIMEOUT = 0.25  # s (was 0.10)
+
+# Treat a reply that is NOT CR-terminated as a failed read instead of parsing
+# it. pyserial's read_until() hands back whatever arrived when it times out,
+# without the terminator -- so half of a POS reply used to become a shorter but
+# perfectly parseable (and completely wrong) position. See
+# protocol_faulhaber.send_cmd. Set False to restore the old lenient behaviour.
+REQUIRE_CR_TERMINATED_REPLY = True
+
+# Longest PAUSE tolerated BETWEEN two bytes of one reply before the reply is
+# considered dead. This is NOT the total wait -- that is the per-call timeout
+# (POLL_TIMEOUT for polling traffic). The two are separate on purpose:
+#
+# pyserial's read_until() abandons a reply the first time a single read(1)
+# comes back empty, so ONE pause was enough to throw away everything received
+# so far. The 2026-07-23 rig log is full of that: 'POS' replies cut to '768',
+# '752', '734' -- the leading digits of the live position. At 9600 baud a
+# character takes ~1 ms, so this was never a bandwidth limit; the drive
+# stopped mid-message for longer than the read window and the rest was lost.
+#
+# protocol_faulhaber._read_reply_until_cr() now keeps waiting through such
+# gaps until either CR arrives or the total deadline expires.
+REPLY_GAP_TOLERANCE_S = 0.08  # s
+
+# Settle time before the FIRST write after a read that timed out or came back
+# truncated. In that situation the drive still owes us a reply which may not
+# have started arriving yet, so checking in_waiting proves nothing -- waiting
+# this long and then draining makes sure the orphaned reply is discarded whole
+# instead of being cut in half by the next write (which is what turns it into
+# a parseable-but-wrong position). Longer than WRITE_SETTLE_S on purpose: it
+# only costs anything on the rare recovery path, not on every command.
+SERIAL_RECOVERY_SETTLE_S = 0.05  # s
 
 # Re-check cadence for pause/stop loops that wait on user action
 # (e.g. during a jog or reference-run wait). New in this pass,
@@ -82,6 +212,16 @@ POLL_TIMEOUT = 0.10  # s
 # (the hardcoded spots in the monolith have not all been switched to
 # this constant yet -- see BACKLOG P3, "make GUI-agnostic").
 PAUSE_POLL_S = 0.05  # s
+
+# How long stop_action() waits for a running scan/free-run worker to actually
+# leave its loop before re-arming the drive (recover_after_stop(), which
+# clears stop_flag). MUST be longer than one worker iteration, or the flag can
+# be cleared before the worker ever looks at it -- that was the "Stop does
+# nothing, press it several times" bug: stop_flag was only True for the ~20 ms
+# that safe_stop() takes, while the worker's sleep loops only check it every
+# PAUSE_POLL_S (50 ms). Bounded so a wedged worker cannot block re-arming
+# forever.
+STOP_JOIN_TIMEOUT_S = 10.0  # s
 
 
 # =====================================================================
@@ -142,6 +282,36 @@ RAMP_DEC = 100
 # Rarely reached on short scan-step moves (ramp-limited long before SP), but
 # caps longer moves (Reference Run, large jumps).
 RAMP_SP = 10000
+
+
+# =====================================================================
+# FREE RUN RESOLUTION ESTIMATE (scan_engine.free_run_scan_action)
+# =====================================================================
+# Measured via probe_move_timing.py on THIS rig, 2026-07-22 (see
+# BACKLOG.md / the probe_report_*.md files for the full raw data): average
+# motor steps between two consecutive POS+DAQ polls, for 90000-step moves
+# (both directions, ~19-20 Hz measured poll rate), at three tested SP
+# (max-speed) settings.
+#
+# NOT a validated physical model -- do not extrapolate a "steps per rpm"
+# formula from this. Two things the raw data showed clearly:
+#   1) Resolution scales MUCH less than proportionally with SP: a 10x lower
+#      SP (10000 -> 1000) only gave ~1.6x finer spacing, not 10x. For these
+#      move distances the AC/DEC ramp (not user-tunable in the GUI) turned
+#      out to dominate average velocity far more than SP does -- the moves
+#      mostly never reach a true SP-limited cruise plateau.
+#   2) Run-to-run variance AT A FIXED SP was up to ~2x in the raw data
+#      (e.g. SP=2000: 1406 to 2812 steps/poll across repeats of the same
+#      90000-step move). Any number derived from this table is an
+#      order-of-magnitude estimate for the GUI info label, not a guarantee
+#      -- shown to the user with that caveat (see gui_main.py).
+# Re-run probe_move_timing.py with --sp if a specific SP needs a real
+# (measured, not interpolated) number.
+FREE_RUN_SP_STEPS_PER_POLL = [
+    (1000, 1653),
+    (2000, 2155),
+    (10000, 2658),
+]
 
 
 # =====================================================================
@@ -223,7 +393,10 @@ REFERENCE_DIRECTION = 1
 # across restarts. Change these here if you want a different reference line
 # by default (e.g. Na-D 589.3, H-beta 486.1) -- see HANDOVER.md for how the
 # calibration sweep uses them.
-CAL_CENTER_NM_DEFAULT = "656.300"  # H-alpha
+# He I (D3) at 587.5618 nm -- the reference line used on this rig. Close to
+# the Na-D doublet region the instrument is usually parked at, so the
+# calibration does not require a long traverse. (Was 656.300 = H-alpha.)
+CAL_CENTER_NM_DEFAULT = "587.5618"  # He I D3
 CAL_SPAN_NM_DEFAULT = "2.0"        # nm, sweep is center +/- span
 CAL_STEP_NM_DEFAULT = "0.2"        # nm
 CAL_DWELL_S_DEFAULT = "0.2"        # seconds (calibration dialog dwell is in
@@ -247,6 +420,53 @@ PRESETTLE_MS_DEFAULT = "0"       # settle time after a move, before measuring (m
 # NI-DAQ takes and at what rate. This is the lowest averaging level
 # (within a single "read"), not to be confused with the higher-level
 # averaging over multiple reads/time windows in acquire_measurement().
+# =====================================================================
+# LIVE AI MONITOR (status-bar readout + bar graph, gui_main._refresh_ai)
+# =====================================================================
+# Continuously shows the current analog-input voltage so the PMT/HV can be
+# adjusted without starting a scan.
+#
+# THREAD/HARDWARE NOTE: an NI-DAQ read creates and tears down a Task on the
+# channel. Two threads doing that on the SAME channel at the same time makes
+# NI-DAQmx fail with a resource-reservation error. The monitor therefore
+# ACTIVELY polls only while idle; during a scan it just displays the value
+# the scan's own read already produced (state['last_pmt_v']), costing nothing.
+# =====================================================================
+# SIMULATOR: mechanical backlash (sim_hardware.FakeFaulhaber)
+# =====================================================================
+# The simulator used to have ZERO backlash -- "M" added the commanded delta to
+# POS exactly, and the fake PMT signal was derived from the APP's own
+# current_nm bookkeeping rather than from any simulated mechanics. Nothing
+# position-related could therefore be reproduced off the rig: running the
+# backlash calibration against SIM returned ~0.002 nm, which was pure centroid
+# noise on the simulated signal (verified: median 0.00199 nm over 200 runs with
+# a true backlash of exactly 0).
+#
+# With this set > 0 the simulator models real slack: on a direction REVERSAL
+# the first SIM_BACKLASH_NM worth of travel turns the motor (and is counted by
+# POS, exactly as a real encoder would) WITHOUT moving the grating. The
+# simulated signal follows the grating, not the encoder -- so backlash
+# compensation, the calibration routine and scan drift all become testable
+# without hardware.
+#
+# 0.082 nm is the value measured on the rig, which makes SIM behave like the
+# real instrument. Set to 0.0 to get the old ideal-mechanics simulator back.
+SIM_BACKLASH_NM = 0.082
+
+AI_MONITOR_ENABLED = True
+AI_MONITOR_HZ = 4.0          # GUI refresh rate while idle (3-5 Hz is plenty)
+
+# Colour thresholds for the bar graph / value label, in volts.
+#   v <  AI_WARN_V   -> green
+#   AI_WARN_V <= v < AI_ALARM_V -> yellow
+#   v >= AI_ALARM_V  -> red
+AI_WARN_V = 6.0
+AI_ALARM_V = 7.0
+
+# Full-scale value of the bar graph (the DAQ channel is configured
+# 0..10 V in daq.read_pmt_voltage).
+AI_BAR_MAX_V = 10.0
+
 DAQ_SAMPLES_PER_READ = 10    # hardware samples per read
 DAQ_SAMPLE_RATE_HZ = 1000    # sample rate (Hz)
 
@@ -312,6 +532,28 @@ OST_CURRENT_LIMIT_ACTIVE = 0x0010   # bit4
 OST_DEVIATION_ERROR      = 0x0020   # bit5
 OST_OVERVOLTAGE          = 0x0040   # bit6
 OST_OVERTEMPERATURE      = 0x0080   # bit7
+# --- OST digital input bits: THESE ARE RAW LEVELS, NOT "TRIPPED" FLAGS -----
+# Manual Tab. 8: bits 8/9/10 are "Zustand Eingang 1/2/3" -- the electrical
+# LEVEL of the input, nothing more.
+#
+# On THIS rig the limit switches are ACTIVE LOW, measured directly (three
+# read_faulhaber_config.py runs while pressing each endstop by hand):
+#     OST 0x0500  = bit8+bit10 set  -> BOTH endstops FREE (idle/normal state)
+#     OST 0x0400  = bit8 cleared    -> Input 1 endstop PRESSED
+#     OST 0x0100  = bit10 cleared   -> Input 3 endstop PRESSED
+# This matches the drive's own configuration: IOC reports Hard Polarity
+# HP = 00000, and per the manual HP bit 0 means "falling edge / LOW level
+# valid" -- so LOW is the engaged state.
+#
+# => AN ENDSTOP IS ENGAGED WHEN ITS BIT IS *CLEARED*, NOT WHEN IT IS SET.
+#
+# Any limit check must therefore test for a 1->0 transition. Testing for
+# "bit became set" is exactly backwards and would (a) ignore every real
+# endstop hit and (b) fire when a switch is RELEASED. See the dormant guard
+# in motion._pos_wait_impl_fallback and BACKLOG for why that guard is still
+# deliberately not activated.
+OST_ENDSTOP_ACTIVE_LOW = True   # rig-measured, see above
+
 OST_STATUS_INPUT1        = 0x0100   # bit8  (digital input 1)
 OST_STATUS_INPUT2        = 0x0200   # bit9  (digital input 2)
 OST_STATUS_INPUT3        = 0x0400   # bit10 (digital input 3)
@@ -325,9 +567,20 @@ OST_INPUT_MASK = (OST_STATUS_INPUT1 | OST_STATUS_INPUT2 | OST_STATUS_INPUT3)
 
 # --- Legacy OST masks, CURRENTLY DISABLED (value 0x0000). Used by
 #     postmove_limit_audit() in an OR; with 0x0000 they contribute nothing.
-#     Not deleted (doc policy), only clearly flagged -- if the rig ever
-#     provides real hard/internal-limit bits, enter the matching values
-#     here. ---
+#     Not deleted (doc policy), only clearly flagged. ---
+#
+# WARNING -- the old example values in the comments below were INVERTED and
+# have been corrected to a warning instead: "256 = hard limit reached" and
+# "1024 = internal software limit" would be bit8 (Input 1) and bit10
+# (Input 3) SET. Per OST_ENDSTOP_ACTIVE_LOW above, those bits being SET means
+# both endstops are FREE. Entering them here would make postmove_limit_audit()
+# report a limit fault after EVERY normal move -- the rig's normal idle OST is
+# 0x0500, i.e. both bits set (visible in the app's own "[AUDIT] Post-move OST
+# OK: 0x0500" log lines).
+#
+# A working limit check cannot be expressed as a simple OR-mask at all,
+# because the fault condition here is a bit being CLEAR. It needs an explicit
+# active-low comparison. Deliberately NOT built speculatively -- see BACKLOG.
 OST_HARD_LIMIT_MASK     = 0x0000  # disabled (e.g. 256 for hard/limit reached)
 OST_INTERNAL_LIMIT_MASK = 0x0000  # disabled (e.g. 1024 for internal software limit)
 

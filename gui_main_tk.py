@@ -459,13 +459,13 @@ btn_clear_queue = ttk.Button(left, text="Clear queue", command=clear_scan_queue)
 btn_clear_plot = ttk.Button(left, text="Clear Plot", command=clear_plot_action); btn_clear_plot.grid(row=24, column=0, columnspan=2, sticky="ew", pady=(8,0))
 
 # ---- Backlash / Slip compensation controls ----
-# Workflow: click "Referenzfahrt" once per session (after Connect, before the
+# Workflow: click "Reference Run" once per session (after Connect, before the
 # first Goto/Scan) to establish a known direction; from then on every
 # direction reversal automatically gets the nm value below added. See the
 # tunables block at the top of the file and reversal_compensation_steps().
 # The nm VALUE persists across restarts (settings JSON); the direction
 # state does NOT (see SETTINGS PERSISTENCE comment at the top of the file)
-# -- that's why Referenzfahrt still has to be repeated every session.
+# -- that's why Reference Run still has to be repeated every session.
 ttk.Separator(left).grid(row=25, column=0, columnspan=2, sticky="ew", pady=(8,4))
 ttk.Label(left, text="Slip / Backlash (nm)").grid(row=26, column=0, sticky="w")
 _saved_settings = app_config.load()
@@ -485,9 +485,9 @@ def _on_slip_nm_edited(_event=None):
 entry_slip_nm.bind("<FocusOut>", _on_slip_nm_edited)
 entry_slip_nm.bind("<Return>", _on_slip_nm_edited)
 
-btn_reference_run = ttk.Button(left, text="Referenzfahrt", command=reference_run_action)
+btn_reference_run = ttk.Button(left, text="Reference Run", command=reference_run_action)
 btn_reference_run.grid(row=27, column=0, columnspan=2, sticky="ew", pady=(4,0))
-lbl_direction_state = tk.Label(left, text="Richtung: unbekannt \u2013 Referenzfahrt n\u00f6tig", anchor="w")
+lbl_direction_state = tk.Label(left, text="Direction: unknown \u2013 Reference Run needed", anchor="w")
 lbl_direction_state.grid(row=28, column=0, columnspan=2, sticky="ew", pady=(2,0))
 
 from matplotlib.figure import Figure
