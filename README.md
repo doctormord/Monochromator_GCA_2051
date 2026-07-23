@@ -1,3 +1,5 @@
+![Monochromator Slip Calibration UI](https://github.com/doctormord/Monochromator_GCA_2051/blob/QT6-future/images/Monochromator_Qt6.png)
+
 # VRS41 Monochromator Controller
 
 Control software for a grating monochromator driven by a FAULHABER brushless
