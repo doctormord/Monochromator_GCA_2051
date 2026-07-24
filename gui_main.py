@@ -48,6 +48,7 @@ NOTE (doc policy, see HANDOVER.md): docstrings/comments are preserved.
 
 import os
 import threading
+import time
 
 import serial
 

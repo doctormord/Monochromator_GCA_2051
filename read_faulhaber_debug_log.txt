@@ -1,0 +1,222 @@
+C:\Monochromator\Christian WIP>python read_faulhaber_config.py --baud 9600 COM3
+Connecting to COM3 @ 9600 baud...
+
+=== Identity ===
+  Controller type                        (GTYP      ) = 'CS-BX4'
+  Serial number                          (GSER      ) = '451600039'
+  Firmware version                       (VER       ) = 'Version 3150.12B'
+
+=== Question 1: sensor/mode (is POS a real position readback?) ===
+  Configuration status (raw)             (CST       ) = 17408
+
+  --- CST decoded (0x4400 / 17408) ---
+    ANSW (answer mode)      : ANSW0 (silent, no acks/async)
+    SOR (speed source)      : SOR0 (RS232)
+    FAULHABER mode          : CONTMOD
+    Power stage (EN/DI)     : Enabled (EN)
+    Position controller     : OFF
+    Analog direction        : ADL
+    Position limits (APL)   : inactive
+    Sine commutation        : no block-comm at high speed
+    Network mode (NET)      : standalone
+  Get Mode (redundant check vs CST)      (GMOD      ) = 'c'
+  Encoder resolution (ENCRES)            (GENCRES   ) = 2048 [4x pulses/rev]
+  Speed constant KN                      (GKN       ) = 227 [rpm/V] (motor ID hint)
+  Motor resistance RM                    (GRM       ) = 3600 [mOhm] (motor ID hint)
+  Step width (STW)                       (GSTW      ) = 1 (only meaningful in STEPMOD/GEARMOD)
+  Steps per rev (STN)                    (GSTN      ) = 1000 (only meaningful in STEPMOD/GEARMOD)
+
+=== Question 2: hardware limit switches (Endschalter) ===
+  I/O configuration (raw)                (IOC       ) = 302317573
+
+  --- IOC decoded (0x12050005 / 302317573) ---
+    Hard-Blocking (HB) active on inputs 1-5 : 00101 (bit0=In1..bit4=In5)
+      -> Input 1 (AnIn): HARD-BLOCKING ENABLED (this input IS configured as a physical limit switch)
+      -> Input 3 (3rd input): HARD-BLOCKING ENABLED (this input IS configured as a physical limit switch)
+    Hard Polarity (HP) rising-edge on 1-5   : 00000
+    Hard Direction (HD) CW-locked on 1-5    : 00101
+    Digital output (DIGOUT) level           : Low
+    Digital input level standard            : 24V (PLC)
+    Fault-Pin function                      : REFIN
+  Homing configuration (raw)             (HOC       ) = 0
+
+  --- HOC decoded (0x00000000 / 0) ---
+    SHA (zero position on edge), inputs 1-5 : 00000
+    SHN (RS232 notify on edge), inputs 1-5  : 00000
+    SHL (stop motor on edge), inputs 1-5    : 00000
+    Power-On Homing Sequence                : disabled
+    NOTE: no homing sequence configured on any input -- GOHOSEQ would be a no-op.
+  Homing speed (HOSP)                    (GHOSP     ) = 100 [rpm, signed = direction]
+  Switch status / latched trips (raw)    (SWS       ) = 0
+
+  --- SWS decoded (0x00000000 / 0) -- LATCHED switch history ---
+    Endschalter EVER tripped since last reset (bits 24-31): 00000000
+      -> no input has latched a trip since it was last cleared/reconfigured.
+  Positive SOFTWARE limit (LL)           (GPL       ) = 1800000000 [steps] (APL range, not a physical switch)
+  Negative SOFTWARE limit (LL)           (GNL       ) = -1800000000 [steps]
+
+=== Position-loop tuning (context for the DEVIATION fault seen at the rig) ===
+  Deviation threshold (DEV)              (GDEV      ) = 2900
+  Target corridor / position window (CORRIDOR) (GCORRIDOR ) = 20 [steps]
+  Position controller P-term (PP)        (GPP       ) = 64
+  Position controller D-term (PD)        (GPD       ) = 4
+
+=== Live snapshot ===
+  Actual position                        (POS       ) = -4125702
+  Target position                        (TPOS      ) = -4125702
+  Operation status (raw)                 (OST       ) = 1280
+
+  --- OST decoded (0x0500 / 1280) -- for reference, app already logs this ---
+    bit 8  Input1 level: ACTIVE
+    bit10  Input3 level: ACTIVE
+  Housing temperature                    (TEM       ) = 30 [C]
+
+=== Config dump done. Nothing was written to the drive (all GET-only). ===
+
+C:\Monochromator\Christian WIP>python read_faulhaber_config.py --baud 9600 COM3
+Connecting to COM3 @ 9600 baud...
+
+=== Identity ===
+  Controller type                        (GTYP      ) = 'CS-BX4'
+  Serial number                          (GSER      ) = '451600039'
+  Firmware version                       (VER       ) = 'Version 3150.12B'
+
+=== Question 1: sensor/mode (is POS a real position readback?) ===
+  Configuration status (raw)             (CST       ) = 17408
+
+  --- CST decoded (0x4400 / 17408) ---
+    ANSW (answer mode)      : ANSW0 (silent, no acks/async)
+    SOR (speed source)      : SOR0 (RS232)
+    FAULHABER mode          : CONTMOD
+    Power stage (EN/DI)     : Enabled (EN)
+    Position controller     : OFF
+    Analog direction        : ADL
+    Position limits (APL)   : inactive
+    Sine commutation        : no block-comm at high speed
+    Network mode (NET)      : standalone
+  Get Mode (redundant check vs CST)      (GMOD      ) = 'c'
+  Encoder resolution (ENCRES)            (GENCRES   ) = 2048 [4x pulses/rev]
+  Speed constant KN                      (GKN       ) = 227 [rpm/V] (motor ID hint)
+  Motor resistance RM                    (GRM       ) = 3600 [mOhm] (motor ID hint)
+  Step width (STW)                       (GSTW      ) = 1 (only meaningful in STEPMOD/GEARMOD)
+  Steps per rev (STN)                    (GSTN      ) = 1000 (only meaningful in STEPMOD/GEARMOD)
+
+=== Question 2: hardware limit switches (Endschalter) ===
+  I/O configuration (raw)                (IOC       ) = 302317573
+
+  --- IOC decoded (0x12050005 / 302317573) ---
+    Hard-Blocking (HB) active on inputs 1-5 : 00101 (bit0=In1..bit4=In5)
+      -> Input 1 (AnIn): HARD-BLOCKING ENABLED (this input IS configured as a physical limit switch)
+      -> Input 3 (3rd input): HARD-BLOCKING ENABLED (this input IS configured as a physical limit switch)
+    Hard Polarity (HP) rising-edge on 1-5   : 00000
+    Hard Direction (HD) CW-locked on 1-5    : 00101
+    Digital output (DIGOUT) level           : Low
+    Digital input level standard            : 24V (PLC)
+    Fault-Pin function                      : REFIN
+  Homing configuration (raw)             (HOC       ) = 0
+
+  --- HOC decoded (0x00000000 / 0) ---
+    SHA (zero position on edge), inputs 1-5 : 00000
+    SHN (RS232 notify on edge), inputs 1-5  : 00000
+    SHL (stop motor on edge), inputs 1-5    : 00000
+    Power-On Homing Sequence                : disabled
+    NOTE: no homing sequence configured on any input -- GOHOSEQ would be a no-op.
+  Homing speed (HOSP)                    (GHOSP     ) = 100 [rpm, signed = direction]
+  Switch status / latched trips (raw)    (SWS       ) = 0
+
+  --- SWS decoded (0x00000000 / 0) -- LATCHED switch history ---
+    Endschalter EVER tripped since last reset (bits 24-31): 00000000
+      -> no input has latched a trip since it was last cleared/reconfigured.
+  Positive SOFTWARE limit (LL)           (GPL       ) = 1800000000 [steps] (APL range, not a physical switch)
+  Negative SOFTWARE limit (LL)           (GNL       ) = -1800000000 [steps]
+
+=== Position-loop tuning (context for the DEVIATION fault seen at the rig) ===
+  Deviation threshold (DEV)              (GDEV      ) = 2900
+  Target corridor / position window (CORRIDOR) (GCORRIDOR ) = 20 [steps]
+  Position controller P-term (PP)        (GPP       ) = 64
+  Position controller D-term (PD)        (GPD       ) = 4
+
+=== Live snapshot ===
+  Actual position                        (POS       ) = -4125702
+  Target position                        (TPOS      ) = -4125702
+  Operation status (raw)                 (OST       ) = 1024
+
+  --- OST decoded (0x0400 / 1024) -- for reference, app already logs this ---
+    bit10  Input3 level: ACTIVE
+  Housing temperature                    (TEM       ) = 30 [C]
+
+=== Config dump done. Nothing was written to the drive (all GET-only). ===
+
+C:\Monochromator\Christian WIP>python read_faulhaber_config.py --baud 9600 COM3
+Connecting to COM3 @ 9600 baud...
+
+=== Identity ===
+  Controller type                        (GTYP      ) = 'CS-BX4'
+  Serial number                          (GSER      ) = '451600039'
+  Firmware version                       (VER       ) = 'Version 3150.12B'
+
+=== Question 1: sensor/mode (is POS a real position readback?) ===
+  Configuration status (raw)             (CST       ) = 17408
+
+  --- CST decoded (0x4400 / 17408) ---
+    ANSW (answer mode)      : ANSW0 (silent, no acks/async)
+    SOR (speed source)      : SOR0 (RS232)
+    FAULHABER mode          : CONTMOD
+    Power stage (EN/DI)     : Enabled (EN)
+    Position controller     : OFF
+    Analog direction        : ADL
+    Position limits (APL)   : inactive
+    Sine commutation        : no block-comm at high speed
+    Network mode (NET)      : standalone
+  Get Mode (redundant check vs CST)      (GMOD      ) = 'c'
+  Encoder resolution (ENCRES)            (GENCRES   ) = 2048 [4x pulses/rev]
+  Speed constant KN                      (GKN       ) = 227 [rpm/V] (motor ID hint)
+  Motor resistance RM                    (GRM       ) = 3600 [mOhm] (motor ID hint)
+  Step width (STW)                       (GSTW      ) = 1 (only meaningful in STEPMOD/GEARMOD)
+  Steps per rev (STN)                    (GSTN      ) = 1000 (only meaningful in STEPMOD/GEARMOD)
+
+=== Question 2: hardware limit switches (Endschalter) ===
+  I/O configuration (raw)                (IOC       ) = 302317573
+
+  --- IOC decoded (0x12050005 / 302317573) ---
+    Hard-Blocking (HB) active on inputs 1-5 : 00101 (bit0=In1..bit4=In5)
+      -> Input 1 (AnIn): HARD-BLOCKING ENABLED (this input IS configured as a physical limit switch)
+      -> Input 3 (3rd input): HARD-BLOCKING ENABLED (this input IS configured as a physical limit switch)
+    Hard Polarity (HP) rising-edge on 1-5   : 00000
+    Hard Direction (HD) CW-locked on 1-5    : 00101
+    Digital output (DIGOUT) level           : Low
+    Digital input level standard            : 24V (PLC)
+    Fault-Pin function                      : REFIN
+  Homing configuration (raw)             (HOC       ) = 0
+
+  --- HOC decoded (0x00000000 / 0) ---
+    SHA (zero position on edge), inputs 1-5 : 00000
+    SHN (RS232 notify on edge), inputs 1-5  : 00000
+    SHL (stop motor on edge), inputs 1-5    : 00000
+    Power-On Homing Sequence                : disabled
+    NOTE: no homing sequence configured on any input -- GOHOSEQ would be a no-op.
+  Homing speed (HOSP)                    (GHOSP     ) = 100 [rpm, signed = direction]
+  Switch status / latched trips (raw)    (SWS       ) = 0
+
+  --- SWS decoded (0x00000000 / 0) -- LATCHED switch history ---
+    Endschalter EVER tripped since last reset (bits 24-31): 00000000
+      -> no input has latched a trip since it was last cleared/reconfigured.
+  Positive SOFTWARE limit (LL)           (GPL       ) = 1800000000 [steps] (APL range, not a physical switch)
+  Negative SOFTWARE limit (LL)           (GNL       ) = -1800000000 [steps]
+
+=== Position-loop tuning (context for the DEVIATION fault seen at the rig) ===
+  Deviation threshold (DEV)              (GDEV      ) = 2900
+  Target corridor / position window (CORRIDOR) (GCORRIDOR ) = 20 [steps]
+  Position controller P-term (PP)        (GPP       ) = 64
+  Position controller D-term (PD)        (GPD       ) = 4
+
+=== Live snapshot ===
+  Actual position                        (POS       ) = -4125702
+  Target position                        (TPOS      ) = -4125703
+  Operation status (raw)                 (OST       ) = 256
+
+  --- OST decoded (0x0100 / 256) -- for reference, app already logs this ---
+    bit 8  Input1 level: ACTIVE
+  Housing temperature                    (TEM       ) = 30 [C]
+
+=== Config dump done. Nothing was written to the drive (all GET-only). ===

@@ -351,11 +351,39 @@ FREE_RUN_SP_STEPS_PER_POLL = [
 # monolith, functionally irrelevant since it's overwritten right away).
 _POS_TOL_STEPS_BASE = 5
 
-# Effective position tolerance: at least 1% of STEPS_PER_NM, so that on
-# rigs with a very fine gearing ratio a too-tight tolerance doesn't cause
-# spurious timeouts. Used in motion.wait_until_position() as the default
-# for the 'tol' parameter.
-POS_TOL_STEPS = max(int(0.01 * STEPS_PER_NM), int(_POS_TOL_STEPS_BASE))
+# Effective position tolerance, used in motion.wait_until_position() as the
+# default for the 'tol' parameter.
+#
+# MEASURED ON THE RIG 2026-07-24 (step_resolution_test.py, 10 moves per step
+# size at 0.01 / 0.001 / 0.0001 nm): the drive lands on target with a final
+# error of 0-1 encoder counts EVERY time, at every step size. It is a closed
+# loop on the same encoder POS reports, so exact arrival is what it can do.
+# The tightest candidate tolerance that succeeded on all 30 moves was 20
+# steps -- the drive's own GCORRIDOR.
+#
+# The old value was `0.01 * STEPS_PER_NM` = 3617 steps = 10 pm, which is
+# EXACTLY one 0.01 nm scan step and TEN TIMES a 0.001 nm step. A move
+# therefore counted as arrived before it had meaningfully started, and the
+# individual points of a fine scan did not sit where their label said.
+#
+# 90 steps (0.25 pm) chosen rather than the measured minimum of 20:
+#   * 90x margin over the worst error actually observed (1 step),
+#   * 4.5x the drive's own 20-step control corridor, so the app is not
+#     demanding tighter positioning than the servo itself targets,
+#   * still 4x finer than a 0.001 nm step (362 steps) and 40x finer than a
+#     0.01 nm step, so the tolerance is no longer the dominant error.
+#
+# Going FINER than 0.001 nm needs a smaller value again (0.0001 nm is only 36
+# steps, so 90 would be 2.5x the step). Re-run step_resolution_test.py before
+# doing that -- and note the caveat below.
+#
+# WHAT THIS MEASUREMENT DOES *NOT* PROVE: it reads POS, i.e. the ENCODER.
+# It shows the servo positions superbly; it says nothing about whether the
+# grating actually moved. At 36 steps (0.0001 nm) stiction in the drive train
+# could leave the optics stationary while the encoder reaches target. That
+# question needs an OPTICAL test: scan a known line with fine steps and check
+# that the peak is genuinely resolved rather than smeared.
+POS_TOL_STEPS = 90
 
 # How many consecutive polls must lie within tolerance before a position
 # counts as "stably reached" (debounce against single outlier reads).
@@ -550,6 +578,33 @@ PLOT_PALETTE = [
 # 0.082 nm is the value measured on the rig, which makes SIM behave like the
 # real instrument. Set to 0.0 to get the old ideal-mechanics simulator back.
 SIM_BACKLASH_NM = 0.082
+
+# --- Simulator motion timing -------------------------------------------
+# The simulated drive used to execute "M" INSTANTLY: POS jumped straight to
+# the target. Free Run polls position+signal continuously DURING one long
+# move, so in SIM the sweep was already over before the loop could sample it
+# and the plot got exactly ONE point. Stepped scans were unaffected (each
+# step is its own move), which is why this went unnoticed.
+#
+# Both figures below are derived from the rig, not invented: the 2026-07-23
+# speed sweep ran identical 5 nm free runs at 1000-10000 rpm and logged the
+# point count at the measured ~19.5 Hz poll rate.
+#   * Below ~2000 rpm the duration scales linearly at 61 steps/s per rpm.
+#   * Above that the ramp dominates and the sweep never got faster than about
+#     280 000 steps/s (5 nm in ~6.5 s), so the speed is capped there.
+# Artificial delay on every simulated POS reply, in seconds.
+# WHY: the fake port answers instantly, so a Free Run in SIM polled as fast as
+# Python could loop -- 27 000 points for a 1 nm sweep, where the rig produces
+# about 20 per second. That is not a useful preview and it bloats the plot and
+# the CSV. On the instrument the rate is set by the DAQ task setup plus the
+# serial round trip (~19-20 Hz measured). 5 ms here gives a few hundred hertz:
+# still faster than the rig, so tests stay quick, but the same order of
+# magnitude of data rather than three orders too many. Raise it towards 0.05
+# to reproduce the rig's point density exactly.
+SIM_POLL_LATENCY_S = 0.005
+
+SIM_STEPS_PER_S_PER_RPM = 61.0
+SIM_MAX_STEPS_PER_S = 280000.0
 
 AI_MONITOR_ENABLED = True
 AI_MONITOR_HZ = 4.0          # GUI refresh rate while idle (3-5 Hz is plenty)

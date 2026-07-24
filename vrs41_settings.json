@@ -1,14 +1,14 @@
 {
-  "backlash_slip_nm": 0.08584843911944517,
-  "last_current_nm": 588.0399999999931,
+  "backlash_slip_nm": 0.09074040411223905,
+  "last_current_nm": 588.7500000000002,
   "jog_step_nm": "0.5",
-  "port": "COM3",
-  "scan_start_nm": "587.75",
-  "scan_end_nm": "588.150",
-  "scan_step_nm": "0.0001",
-  "free_run_sp_rpm": 5000,
+  "port": "SIM",
+  "scan_start_nm": "588",
+  "scan_end_nm": "587",
+  "scan_step_nm": "0.05",
+  "free_run_sp_rpm": 2000,
   "autosave_csv": true,
-  "avg_samples": "10",
+  "avg_samples": "8",
   "avg_mode": "samples",
   "baud": "9600",
   "scan_wait_ms": "0",
@@ -19,8 +19,5 @@
   "daq_dev": "Dev1",
   "slip_nm": "0.09074040411223905",
   "daq_ai": "ai1",
-  "legend_font_px": 13,
-  "cal_span_nm": "1",
-  "cal_step_nm": "0.01",
-  "cal_dwell_s": "0"
+  "legend_font_px": 13
 }

@@ -699,11 +699,18 @@ Honest list. Details and measurements are in `BACKLOG.md`.
 - **Both limit switches block the same direction of travel** (`HD = 00101`).
   For a pair of end-of-travel switches this means only one end is actually
   protected. Changing it requires writing to the drive and has not been done.
-- **`POS_TOL_STEPS` does not scale with the step size.** It is a fixed
-  0.01 nm, which equals a whole step at 0.01 nm and is ten times the step at
-  0.001 nm. The absolute grid stops errors accumulating, but individual fine
-  steps may still sit off their nominal position. Use
-  `step_resolution_test.py` before scanning finer than 0.01 nm.
+- **`POS_TOL_STEPS` still does not scale with the step size**, but it is no
+  longer the dominant error. Measured on the rig with
+  `step_resolution_test.py` (10 moves each at 0.01 / 0.001 / 0.0001 nm), the
+  drive lands within 0–1 encoder counts of target every time, so the value
+  was tightened from 3617 steps (10 pm — a whole 0.01 nm step) to **90 steps
+  (0.25 pm)**. That is 4× finer than a 0.001 nm step. To scan finer than
+  0.001 nm, re-run the test and reduce it further.
+- **That measurement reads the encoder, not the wavelength.** It proves the
+  servo positions superbly; it does not prove the grating moved. At 0.0001 nm
+  (36 steps) stiction could leave the optics stationary while the encoder
+  reaches target. Confirming the smallest *optically* useful step needs a
+  scan across a known line, not a position readback.
 - **Free Run point spacing is uneven** and depends on speed and link
   performance.
 - **`LR` is relative to the last commanded setpoint, not the actual
