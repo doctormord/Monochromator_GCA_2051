@@ -38,9 +38,6 @@ invites optimistic claims:
   steps. Every displayed wavelength derives from an anchor you set with
   *Known λ here*. Move the grating by hand and the reading is wrong until you
   re-anchor.
-- **Repeatability was measured, not assumed.** Ten identical repeat scans
-  showed a strictly monotonic drift of **+2.5 pm per cycle** over 200-step
-  scans.
 
 ---
 
@@ -130,7 +127,8 @@ redraws when data actually changed.
 ### Correctness fixes found along the way
 
 Rewriting the motion and protocol layers surfaced a series of real defects.
-Each was diagnosed from instrument logs:
+Each was diagnosed from instrument logs rather than guessed; `BACKLOG.md`
+records the measurements behind every one:
 
 - **Scan drift.** Each step was commanded relative to the position measured
   just before it, so any shortfall was carried forward permanently. Now an
@@ -147,6 +145,9 @@ Each was diagnosed from instrument logs:
 - **Stop sometimes did nothing.** The re-arming step cleared the stop flag
   while the scan worker was still running, so the request could be missed
   entirely.
+- **Free Run counted backlash compensation as optical travel**, so a sweep
+  landed exactly one compensation short of its target and disagreed with a
+  stepped scan of the same line.
 
 ### Everything else
 
