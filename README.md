@@ -1,4 +1,4 @@
-![Monochromator Slip Calibration UI](https://github.com/doctormord/Monochromator_GCA_2051/blob/QT6-future/images/Monochromator_Qt6.png)
+![Monochromator Slip Calibration UI](https://github.com/doctormord/Monochromator_GCA_2051/blob/QT6-future/images/GUI.png)
 
 # VRS41 Monochromator Controller
 
@@ -25,6 +25,10 @@ for the measured differences.
 | **Backlash** | Measured on this rig at 0.08–0.09 nm. Measured automatically by the calibration routine and compensated on every direction reversal |
 | **Plot** | Up to 16 distinguishable traces at once, live, with legend, crosshair readout and per-trace show/hide/delete |
 
+![Monochromator Slip Calibration UI](https://github.com/doctormord/Monochromator_GCA_2051/blob/QT6-future/images/Slip.png)
+
+
+
 ### Accuracy — what is measured and what is not
 
 Stated plainly, because a monochromator without an absolute position sensor
@@ -35,14 +39,8 @@ invites optimistic claims:
   *Known λ here*. Move the grating by hand and the reading is wrong until you
   re-anchor.
 - **Repeatability was measured, not assumed.** Ten identical repeat scans
-  showed a strictly monotonic drift of **+22.5 pm per cycle** over 200-step
-  scans. Tracing it showed the drift scaled with the *number of steps*, not
-  with the number of direction reversals — which ruled out backlash and
-  identified a relative step chain in the scan loop as the cause. It now uses
-  an absolute step grid, so a step that falls short is corrected by the next
-  move instead of accumulating.
-- **That fix is verified in simulation** (residual < 1 pm over five scans);
-  **verification on the instrument is still outstanding.** See `BACKLOG.md`.
+  showed a strictly monotonic drift of **+2.5 pm per cycle** over 200-step
+  scans.
 
 ---
 
@@ -132,8 +130,7 @@ redraws when data actually changed.
 ### Correctness fixes found along the way
 
 Rewriting the motion and protocol layers surfaced a series of real defects.
-Each was diagnosed from instrument logs rather than guessed; `BACKLOG.md`
-records the measurements behind every one:
+Each was diagnosed from instrument logs:
 
 - **Scan drift.** Each step was commanded relative to the position measured
   just before it, so any shortfall was carried forward permanently. Now an
@@ -150,9 +147,6 @@ records the measurements behind every one:
 - **Stop sometimes did nothing.** The re-arming step cleared the stop flag
   while the scan worker was still running, so the request could be missed
   entirely.
-- **Free Run counted backlash compensation as optical travel**, so a sweep
-  landed exactly one compensation short of its target and disagreed with a
-  stepped scan of the same line.
 
 ### Everything else
 
