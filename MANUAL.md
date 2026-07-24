@@ -33,9 +33,14 @@ NI-DAQ analog input reading the PMT.
 ## 1. Quick start
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate     # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
-python main.py
+python3 main.py
 ```
+
+A virtual environment is recommended but not required — the application only
+needs PyQt6, pyqtgraph and pyserial, plus `nidaqmx` if real hardware is
+attached.
 
 A normal measurement session:
 
@@ -311,15 +316,37 @@ summary CSV.
 
 ## 10. The plot
 
-- **Legend** — one entry per scan, in the curve's colour, deliberately short:
-  time, range, step and a compact averaging token (`x8` = 8 samples, `60%` =
-  time mode at 60 %). The legend sits on top of the data, so it only has to
+- **Legend** — one entry per scan, in the curve's colour, deliberately short
+  and in the same format for both scan types:
+
+  | Scan type | Legend entry |
+  |---|---|
+  | Stepped | `22:06:24 589→588 Δ0.1 x8` |
+  | Free Run | `22:06:31 589→588 free 10000rpm` |
+
+  Both start with `HH:MM:SS`. A stepped scan shows its step and a compact
+  averaging token (`x8` = 8 samples, `60%` = time mode at 60 %); a free run
+  has neither, so it shows its sweep speed instead — the one setting that
+  distinguishes two otherwise identical free runs. The legend sits on top of the data, so it only has to
   tell curves apart — the full acquisition settings are in the log and in the
-  CSV header.
+  CSV header. Its text size is set by `legend_font_px` in
+  `vrs41_settings.json` and defaults to 13 px, the same size as the axis
+  labels; raise it for a high-DPI display. The change takes effect on
+  restart.
 - **Crosshair** — follows the mouse; the header shows *Cursor λ* and
   *Cursor V*. It survives *Clear Plot*.
-- **Clear Plot** — on the scope toolbar, above the plot. Clears the traces
-  only; saved CSVs are untouched.
+- **Traces ▾** — show, hide or delete an **individual** curve. Hiding keeps
+  the data (it can be brought back with *Show all*); *Remove this trace*
+  discards it and its legend entry. Saved CSVs are never affected.
+- **Save PNG** — writes the plot as an image. The export uses a **white**
+  background and 1600 px width, because the dark on-screen theme is for the
+  screen, not for a report. For full control over size, background and format
+  (SVG, CSV of the plotted data) use the plot's right-click menu → *Export*.
+- **Clear Plot** — removes **all** traces at once. Saved CSVs are untouched.
+
+There is **no light/dark mode** — the interface is dark only. The one place
+that matters for output is the PNG export, which already switches to a light
+background for you.
 - **Zoom / pan** — mouse wheel and drag (pyqtgraph). Right-click for the
   standard menu including *Export*.
 
@@ -347,9 +374,22 @@ If the label reads **`AI (SIM)`**, the values are simulated (§18).
 
 ## 12. Export and file formats
 
-CSV, written to the folder and filename pattern set in EXPORT. *Autosave*
-writes automatically at the end of every scan; *Save CSV now* writes the
-active scan on demand.
+### When is a scan written to disk?
+
+| Event | With Autosave on | With Autosave off |
+|---|---|---|
+| Scan finishes normally | Written automatically, `status: completed` | Not written |
+| **Stop pressed** | **Written automatically**, `status: interrupted` — the points measured so far are kept | Not written |
+| Queue finishes | Every scan written, plus an optional bulk export and summary | Bulk export offered |
+| *Save CSV now* pressed | Writes the active scan immediately, at any time | Same |
+
+So a stopped scan is **not** lost: with Autosave on, the partial data is
+saved and marked `interrupted` in the header, so it can never be mistaken for
+a complete measurement. To keep a scan that is still running, press
+*Save CSV now* — it exports what has been measured up to that moment and can
+be pressed repeatedly.
+
+Folder and filename pattern are set in the EXPORT section.
 
 The header carries the full acquisition context:
 
@@ -464,6 +504,7 @@ defaults rather than crashing.
 | `free_run_sp_rpm` | Free Run speed |
 | `jog_step_nm` | Jog step |
 | `export_dir`, `export_pattern`, `autosave_csv` | Export |
+| `legend_font_px` | Plot legend text size in pixels (default 13 = same as the axis labels). Takes effect on restart |
 | `daq_dev`, `daq_ai` | DAQ device and channel |
 | `cal_center_nm`, `cal_span_nm`, `cal_step_nm`, `cal_dwell_s` | Calibration dialog |
 
@@ -526,6 +567,27 @@ to touch:
 | `AI_WARN_V`, `AI_ALARM_V`, `AI_BAR_MAX_V` | Monitor thresholds and full scale |
 | `AI_MONITOR_HZ`, `AI_MONITOR_ENABLED` | Monitor refresh |
 | `OST_ENDSTOP_ACTIVE_LOW` | Endstop polarity (measured: active low) |
+
+### UI theme
+
+All interface colours live in one block in `device_constants.py` (section
+*UI THEME*) so the look can be adjusted by hand without touching
+`gui_main.py`. Changes take effect on restart.
+
+| Constant | Meaning |
+|---|---|
+| `C_BG`, `C_PANEL`, `C_PANEL2`, `C_BORDER` | Surfaces and borders |
+| `C_TEXT`, `C_MUTED` | Normal and secondary text |
+| `C_ACCENT`, `C_ACCENT_D`, `C_ON_ACCENT` | Teal accent, its pressed state, and text on it |
+| `C_WARN`, `C_ERROR`, `C_OK`, `C_AMBER` | State colours (`C_AMBER` is the AI monitor's warn band) |
+| `C_DISABLED_FG`, `C_DISABLED_BD` | Disabled buttons |
+| `C_LEGEND_BG` | Legend backdrop, as `(R, G, B, A)` |
+| `PLOT_PALETTE` | **16** trace colours, used in order and then cycled |
+
+The palette was picked numerically, not by eye: every colour has at least
+5.1:1 contrast against the background, the closest pair is 26.6 CIELAB ΔE
+apart, and consecutive entries are at least 53 ΔE apart so two scans run back
+to back never look alike. If you edit it, keep those three properties in mind.
 
 ### Defaults and simulator
 

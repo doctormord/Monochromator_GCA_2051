@@ -478,10 +478,21 @@ def scan_action():
             # pressing Stop unlocked them, because stop_action() happens to call
             # recover_after_stop(), which calls this same hook as a side effect.
             ui_hook('set_buttons_scanning', False)
-            log("[DONE] Scan complete.")
+            # Say what actually happened. The loop is left by `break` on Stop
+            # as well as on normal completion, so this used to print
+            # "[DONE] Scan complete." directly after "[STOP] Scan aborted" --
+            # two contradictory lines about the same scan. The CSV status was
+            # already correct ("interrupted"); only the log lied.
+            _was_stopped = bool(state.get("stop_flag"))
+            if _was_stopped:
+                log("[DONE] Scan stopped early -- partial data kept and saved.")
+            else:
+                log("[DONE] Scan complete.")
             try:
                 if state.get('active_plot_id'):
-                    _plot().finalize_scan(state['active_plot_id'], status="completed")
+                    _plot().finalize_scan(
+                        state['active_plot_id'],
+                        status=("interrupted" if _was_stopped else "completed"))
 
                 try:
                     if refs['autosave_csv_var'].get():
@@ -649,7 +660,18 @@ def free_run_scan_action():
                 speed_ratio = RAMP_SP / float(sp_rpm)
                 timeout_s = min(MAX_MOVE_TIMEOUT, timeout_s * speed_ratio)
 
-            label = time.strftime('%Y-%m-%d %H:%M') + f" \u03bb={s_nm:.3f}\u2192{e_nm:.3f} FREE RUN"
+            # Same short legend format as the stepped scan (see there), with
+            # SECONDS. The old label used '%Y-%m-%d %H:%M' -- no seconds -- so
+            # two free runs started in the same minute produced byte-identical
+            # legend entries and could not be told apart. Free runs are quick
+            # and typically fired back to back, which is exactly when that
+            # happens: the three sweeps in the 2026-07-23 rig log ran at
+            # 16:20:50, 16:21:03 and 16:21:12, i.e. two of them would have
+            # collided. Step/averaging are omitted because a free run has
+            # neither; the sweep speed is shown instead, since that is the one
+            # setting that distinguishes two otherwise identical free runs.
+            label = (f"{time.strftime('%H:%M:%S')} "
+                     f"{s_nm:g}\u2192{e_nm:g} free {sp_rpm:g}rpm")
             state['active_plot_id'] = _plot().start_new_scan(
                 label, {'start': s_nm, 'end': e_nm, 'step': None, 'mode': 'free_run'})
 

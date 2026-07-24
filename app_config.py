@@ -97,6 +97,12 @@ DEFAULT_CONFIG = {
     # Backlash calibration dialog (gui_main.CalibrationDialog). None = use
     # the CAL_*_DEFAULT constants in device_constants.py until the user
     # changes a field here.
+    # Plot legend font size in PIXELS. Default 13 = exactly the size of the
+    # axis tick labels, so the legend reads as part of the plot rather than as
+    # fine print. Raise it if the legend is hard to read on a high-DPI display.
+    # Applied when the window is built, so a change takes effect on restart.
+    "legend_font_px": 13,
+
     "cal_center_nm": None,
     "cal_span_nm": None,
     "cal_step_nm": None,

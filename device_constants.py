@@ -74,7 +74,34 @@ SAFE_AFTER_MOVE = True
 # the app. The IOC/HP line then shows the EEPROM value. If it is 00000 the
 # app's HP0 was a harmless no-op all along; if it is anything else, the app
 # has been flipping the endstop polarity every session.
-SEND_LEGACY_HP0 = False
+#
+# ===== 2026-07-24: BACK TO True -- THE EXPERIMENT ABOVE HAS BEEN RUN =====
+# Setting this to False stopped the app writing HP0, and the drive then used
+# its own STORED polarity for the first time. The result at the rig: the motor
+# would only travel in ONE direction. Every move the other way ended in
+# "[STOP] Motion interrupted" / "[ERROR] Goto failed after auto-recover",
+# and calibration became impossible.
+#
+# That is exactly what the stored configuration predicts:
+#   IOC:  HB = 00101  -> inputs 1 and 3 ARE hard-blocking limit switches
+#         HD = 00101  -> both of them block CLOCKWISE travel
+#   OST:  0x0500      -> both inputs sit at HIGH level in normal operation
+# With a stored HP bit of 1 ("rising edge / HIGH level valid") the drive reads
+# those permanently-HIGH inputs as "both endstops pressed" and blocks clockwise
+# travel forever. Writing HP0 flips the interpretation to "LOW level valid",
+# the inputs read as free, and both directions work.
+#
+# So the drive's stored polarity does not match this rig's wiring, and the
+# app's HP0 was silently compensating for it all along. Sending it is
+# therefore CORRECT here, not the accident it looked like -- the misleading
+# part was only ever the name (HP is limit-switch polarity, not "hold
+# position"), which is now documented above.
+#
+# PROPER FIX, when the rig is next accessible: set the polarity on the drive
+# itself and SAVE it, then this flag can go back to False and the limit
+# switches will be armed correctly even before the app connects -- which is
+# the state you actually want for a safety function. Until then, leave True.
+SEND_LEGACY_HP0 = True
 
 
 # =====================================================================
@@ -420,6 +447,77 @@ PRESETTLE_MS_DEFAULT = "0"       # settle time after a move, before measuring (m
 # NI-DAQ takes and at what rate. This is the lowest averaging level
 # (within a single "read"), not to be confused with the higher-level
 # averaging over multiple reads/time windows in acquire_measurement().
+# =====================================================================
+# UI THEME -- all colours in one place
+# =====================================================================
+# Every colour the GUI uses lives here so the look can be adjusted by hand
+# without hunting through gui_main.py. Values are CSS hex strings.
+#
+# SCOPE NOTE: these are consumed by gui_main.py only. They sit in this file
+# because it is the project's single "edit these by hand" module, not because
+# they are device properties.
+#
+# CHANGES TAKE EFFECT ON RESTART: the stylesheet is built once at import and
+# most widgets bake their colours in at construction time.
+
+# --- surfaces -------------------------------------------------------------
+C_BG          = "#0e1116"   # window background
+C_PANEL       = "#161b22"   # panel / section surfaces
+C_PANEL2      = "#1c232d"   # input fields
+C_BORDER      = "#2a323d"   # borders, separators, grid lines
+
+# --- text -----------------------------------------------------------------
+C_TEXT        = "#e6edf3"   # normal text and values
+C_MUTED       = "#8b949e"   # section headers, units, secondary text
+
+# --- accents and states ---------------------------------------------------
+C_ACCENT      = "#3ad0c8"   # teal: primary action, active values
+C_ACCENT_D    = "#1f8f89"   # darker teal: pressed/hover on primary buttons
+C_ON_ACCENT   = "#06110f"   # text ON a teal button (must contrast with C_ACCENT)
+C_WARN        = "#d8a657"   # warnings
+C_ERROR       = "#e5534b"   # errors, danger buttons, alarm threshold
+C_OK          = "#3fb950"   # success, "connected", normal signal level
+C_AMBER       = "#d29922"   # AI monitor warn band (between WARN_V and ALARM_V)
+
+# --- disabled / inactive --------------------------------------------------
+C_DISABLED_FG = "#4b535d"   # disabled button text
+C_DISABLED_BD = "#232a33"   # disabled button border
+
+# --- plot -----------------------------------------------------------------
+C_LEGEND_BG   = (20, 26, 34, 200)   # legend backdrop, R,G,B,A -- semi-transparent
+                                    # so traces underneath stay visible
+
+# Colours assigned to scan traces, in order, cycling when exhausted.
+# EXPANDED FROM 8 TO 16: with only eight, a ninth scan reused the first
+# colour and the two became indistinguishable in the legend -- and comparing
+# ten repeat scans is a routine measurement here (see BACKLOG drift series).
+# Chosen numerically for separability ON THE DARK BACKGROUND, not by eye:
+# every colour has >= 5.1:1 contrast against C_BG, the closest PAIR is 26.6
+# CIELAB deltaE apart (the previous 8-colour set had a pair at 16.1 -- sand
+# vs orange were genuinely easy to confuse), and CONSECUTIVE entries are at
+# least 53 deltaE apart so two scans run back to back never look alike.
+# Saturation is deliberately capped: a purely distance-optimal set came out
+# neon (#25f725, #e225f7) and clashed with the rest of the interface.
+# If you edit these by hand, keep those three properties in mind.
+PLOT_PALETTE = [
+    "#3ad0c8",   #  1 teal (matches C_ACCENT)
+    "#eb5e71",   #  2 red
+    "#5eeb9b",   #  3 mint
+    "#dd5eeb",   #  4 magenta
+    "#ebd196",   #  5 sand
+    "#5e7feb",   #  6 blue
+    "#88bd4b",   #  7 olive
+    "#eb915e",   #  8 orange
+    "#5ebceb",   #  9 sky
+    "#bd79a2",   # 10 mauve
+    "#ebe15e",   # 11 yellow
+    "#7984bd",   # 12 slate blue
+    "#79bd8d",   # 13 sage
+    "#eb5eb2",   # 14 pink
+    "#5eeb5e",   # 15 green
+    "#bd8679",   # 16 clay
+]
+
 # =====================================================================
 # LIVE AI MONITOR (status-bar readout + bar graph, gui_main._refresh_ai)
 # =====================================================================

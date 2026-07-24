@@ -66,6 +66,10 @@ from device_constants import (
     CAL_CENTER_NM_DEFAULT, CAL_SPAN_NM_DEFAULT, CAL_STEP_NM_DEFAULT,
     CAL_DWELL_S_DEFAULT, RAMP_SP,
     AI_MONITOR_ENABLED, AI_MONITOR_HZ, AI_WARN_V, AI_ALARM_V, AI_BAR_MAX_V,
+    C_BG, C_PANEL, C_PANEL2, C_BORDER, C_TEXT, C_MUTED,
+    C_ACCENT, C_ACCENT_D, C_ON_ACCENT, C_WARN, C_ERROR, C_OK, C_AMBER,
+    C_DISABLED_FG, C_DISABLED_BD, C_LEGEND_BG, PLOT_PALETTE,
+    SEND_LEGACY_HP0,
 )
 import app_config
 from protocol_faulhaber import (
@@ -87,17 +91,9 @@ from scan_engine import (
 # THEME (PS-2600A style: dark lab dashboard, teal accent)
 # =====================================================================
 # Central colors so the plot and QSS share the same look.
-C_BG        = "#0e1116"   # window background
-C_PANEL     = "#161b22"   # panel/section surfaces
-C_PANEL2    = "#1c232d"   # input fields
-C_BORDER    = "#2a323d"
-C_TEXT      = "#e6edf3"
-C_MUTED     = "#8b949e"   # section headers, units
-C_ACCENT    = "#3ad0c8"   # teal (primary action, active values)
-C_ACCENT_D  = "#1f8f89"
-C_WARN      = "#d8a657"
-C_ERROR     = "#e5534b"
-C_OK        = "#3fb950"
+# Colours now live in device_constants.py (UI THEME section) so the whole look
+# can be adjusted in one place by hand. Imported below with the other
+# constants; these names are used unchanged throughout this file.
 
 _QSS = f"""
 QWidget {{
@@ -135,10 +131,10 @@ QPushButton {{
     border-radius: 5px; padding: 6px 12px;
 }}
 QPushButton:hover {{ border: 1px solid {C_ACCENT}; }}
-QPushButton:disabled {{ color: #4b535d; border-color: #232a33; }}
+QPushButton:disabled {{ color: {C_DISABLED_FG}; border-color: {C_DISABLED_BD}; }}
 QPushButton#Primary {{
     background: {C_ACCENT_D}; border: 1px solid {C_ACCENT};
-    color: #06110f; font-weight: 700; padding: 9px 12px;
+    color: {C_ON_ACCENT}; font-weight: 700; padding: 9px 12px;
 }}
 QPushButton#Primary:hover {{ background: {C_ACCENT}; }}
 QPushButton#Danger {{ color: {C_ERROR}; border: 1px solid {C_ERROR}; }}
@@ -445,8 +441,7 @@ class PlotManager:
     addItem() happens in the QTimer-driven _refresh() or via _invoker on the GUI
     thread. So pyqtgraph is never touched from a foreign thread."""
 
-    _PALETTE = ["#3ad0c8", "#e5c07b", "#61afef", "#98c379", "#e06c75",
-                "#c678dd", "#56b6c2", "#d19a66"]
+    _PALETTE = PLOT_PALETTE
 
     def __init__(self, plot_item: pg.PlotItem):
         self._pi = plot_item
@@ -523,6 +518,55 @@ class PlotManager:
             self._jog["x"].append(float(x_nm))
             self._jog["y"].append(float(y_val))
             self._dirty = True
+
+    def list_scans(self):
+        """[(pid, label, visible), ...] in insertion order, for the Traces menu."""
+        with self._lock:
+            return [(pid, m.get("label", pid),
+                     bool(m.get("curve") is None or m["curve"].isVisible()))
+                    for pid, m in self._plots.items()]
+
+    def set_scan_visible(self, pid, visible: bool):
+        """Show/hide ONE trace without discarding its data, so it can be
+        brought back. Curve visibility is a pyqtgraph call, so it is
+        marshalled onto the GUI thread like every other plot mutation."""
+        with self._lock:
+            meta = self._plots.get(pid)
+            if not meta:
+                return
+            curve = meta.get("curve")
+            meta["hidden"] = not visible
+        if curve is not None:
+            _invoker.post(lambda: curve.setVisible(visible))
+
+    def remove_scan(self, pid):
+        """Discard ONE scan entirely: its curve, its points and its legend
+        entry. Previously the only option was Clear Plot, which threw away
+        every trace -- so a single bad sweep among several good ones could not
+        be taken out of the picture."""
+        with self._lock:
+            meta = self._plots.pop(pid, None)
+            if self._active_id == pid:
+                self._active_id = None
+            self._dirty = True
+        if not meta:
+            return
+        curve = meta.get("curve")
+
+        def do():
+            if curve is not None:
+                try:
+                    # This also drops the legend entry: PlotItem.removeItem()
+                    # ends with `if self.legend is not None:
+                    # self.legend.removeItem(item)` (verified in the pyqtgraph
+                    # 0.14.0 source, and measured -- removing one of three
+                    # traces takes the legend from 3 entries to 2 with no
+                    # further call). An extra _plot_legend.removeItem() here
+                    # was redundant and has been dropped.
+                    self._pi.removeItem(curve)
+                except Exception:
+                    pass
+        _invoker.post(do)
 
     def clear_all(self):
         """Remove all series. removeItem/clear must run on the GUI thread; the
@@ -667,6 +711,57 @@ _header.addWidget(_title_dim)
 _header.addStretch(1)
 
 
+def _apply_tabular_numbers(label, sample: str, extra_px: int = 0, bold: bool = True):
+    """Stop a frequently-updated numeric label from changing width.
+
+    THE PROBLEM: the UI fonts render digits PROPORTIONALLY -- "1" is visibly
+    narrower than "8" in Helvetica Neue / SF (macOS) and Segoe UI (Windows).
+    A value that refreshes several times a second therefore changes width on
+    almost every update, so the text jitters and everything laid out after it
+    shifts sideways. Most obvious on the AI readout in the status bar (4 Hz)
+    and on the large header values.
+
+    TWO MEASURES, because either alone is not enough:
+      1. Request the OpenType `tnum` feature (tabular figures), which makes
+         every digit the same width. Fonts that lack the feature simply ignore
+         it -- which is why measure 2 exists.
+      2. Pin a minimum width computed from `sample`, a worst-case string for
+         this label. Even with a font that has no tabular figures, the label
+         can then no longer shrink below that width, so neighbouring widgets
+         stay put. Only the digits themselves can still shift within the
+         reserved space.
+
+    `sample` should be the widest value the label will realistically show
+    (all-8 digits, including sign and unit), not a typical one."""
+    # ensurePolished() first: the font size of these labels comes from the
+    # stylesheet (e.g. QLabel#ReadoutVal is 20px), and until the widget has
+    # been polished label.font() still reports the 13px application default.
+    # Measuring before that reserved barely half the width actually needed.
+    try:
+        label.ensurePolished()
+    except Exception:
+        pass
+    f = QtGui.QFont(label.font())
+    try:
+        f.setFeature(QtGui.QFont.Tag("tnum"), 1)   # Qt 6.7+
+    except Exception:
+        pass                                       # older Qt: measure 2 carries it
+    label.setFont(f)
+    try:
+        # Measure BOLD by default: every one of these labels renders its value
+        # in bold or semibold (the header readouts via the stylesheet, the AI
+        # value via inline <b>), and bold digits are wider than regular ones.
+        # Measuring the regular weight reserved ~1 px too little, so the label
+        # still grew on the widest values -- which defeats the whole point.
+        fm_font = QtGui.QFont(f)
+        if bold:
+            fm_font.setBold(True)
+        fm = QtGui.QFontMetrics(fm_font)
+        label.setMinimumWidth(fm.horizontalAdvance(sample) + extra_px)
+    except Exception:
+        pass
+
+
 def _mk_readout(cap, accent=False):
     """One readout block (small cap + big value) for the header."""
     box = QtWidgets.QVBoxLayout()
@@ -689,6 +784,16 @@ _ro_state_box, ro_state = _mk_readout("STATE")
 # intensity/voltage at that x on the active trace (see _on_plot_mouse_moved).
 _ro_cursor_nm_box, ro_cursor_nm = _mk_readout("CURSOR  λ (nm)", accent=True)
 _ro_cursor_v_box, ro_cursor_v = _mk_readout("CURSOR  V")
+# Pin the numeric header readouts so they stop jittering as digits change.
+# Samples are worst-case: 4 integer digits + decimals, and a leading minus for
+# the voltage.
+# extra_px=6: these labels are styled font-weight 600, which this font
+# renders a hair wider than Qt's synthesised bold used for the measurement.
+# The margin is cheaper and more robust than trying to reproduce the exact
+# stylesheet weight in QFontMetrics.
+_apply_tabular_numbers(ro_lambda,    "8888.888", 6)
+_apply_tabular_numbers(ro_cursor_nm, "8888.888", 6)
+_apply_tabular_numbers(ro_cursor_v,  "-8.8888", 6)
 for b in (_ro_lambda_box, _ro_state_box, _ro_cursor_nm_box, _ro_cursor_v_box):
     _header.addLayout(b)
     _header.addSpacing(18)
@@ -722,10 +827,24 @@ _plot_item.showGrid(x=True, y=True, alpha=0.15)
 # explicit addLegend() those names were never displayed -- so with several
 # traces on screen there was no way to tell which colour was which scan.
 # (The old tkinter build had this; it was lost in the Qt port.)
-_plot_legend = _plot_item.addLegend(offset=(8, 8), labelTextSize="7pt",
-                                    verSpacing=-6, colCount=1)
+# Legend text size comes from the settings file (vrs41_settings.json ->
+# legend_font_px). The default matches the axis tick labels (13 px) so the
+# legend is as readable as the rest of the plot; a hardcoded small value was
+# unreadable on a high-DPI display.
+# NOTE: the plot is built BEFORE _saved_settings is loaded further down, so
+# this reads the config directly. Going through _saved_settings here raised
+# NameError, which the except swallowed -- the setting silently had no effect
+# and the legend always came up at the default.
 try:
-    _plot_legend.setBrush(pg.mkBrush(20, 26, 34, 200))   # readable on dark bg
+    _legend_px = int(app_config.load().get("legend_font_px") or 13)
+except Exception:
+    _legend_px = 13
+_legend_px = max(6, min(40, _legend_px))
+_plot_legend = _plot_item.addLegend(offset=(8, 8),
+                                    labelTextSize=f"{_legend_px}px",
+                                    verSpacing=-2, colCount=1)
+try:
+    _plot_legend.setBrush(pg.mkBrush(*C_LEGEND_BG))   # readable on dark bg
     _plot_legend.setPen(pg.mkPen(C_BORDER))
     _plot_legend.setLabelTextColor(C_TEXT)
 except Exception:
@@ -925,8 +1044,95 @@ def _persist(key, value):
 # there. Wired to clear_plot_action further down (section 9). Note the crosshair
 # is re-attached automatically after a clear now (see PlotManager.clear_all).
 btn_clear_plot = _btn("Clear Plot")
-btn_clear_plot.setToolTip("Clear all traces from the scope (does not touch saved CSV files)")
-_scope_toolbar.addWidget(btn_clear_plot)
+btn_clear_plot.setToolTip("Clear ALL traces from the scope (does not touch saved CSV files)")
+
+# --- Traces menu: show/hide or delete INDIVIDUAL curves -------------------
+# Until now the only way to get rid of a trace was Clear Plot, which removes
+# every trace -- so one bad sweep among several good ones could not be taken
+# out of the picture.
+btn_traces = _btn("Traces \u25be")
+btn_traces.setToolTip("Show, hide or delete individual traces")
+_traces_menu = QtWidgets.QMenu(btn_traces)
+
+
+def _rebuild_traces_menu():
+    """Rebuilt on every open, because the set of traces changes constantly.
+    Each entry is checkable (visibility); the submenu also offers Remove."""
+    _traces_menu.clear()
+    scans = plot_mgr.list_scans()
+    if not scans:
+        a = _traces_menu.addAction("(no traces)")
+        a.setEnabled(False)
+        return
+    for pid, label, visible in scans:
+        sub = _traces_menu.addMenu(label)
+        act_vis = sub.addAction("Visible")
+        act_vis.setCheckable(True)
+        act_vis.setChecked(visible)
+        act_vis.triggered.connect(
+            lambda checked, p=pid: plot_mgr.set_scan_visible(p, checked))
+        act_del = sub.addAction("Remove this trace")
+        act_del.triggered.connect(lambda _=False, p=pid: plot_mgr.remove_scan(p))
+    _traces_menu.addSeparator()
+    act_all = _traces_menu.addAction("Show all")
+    act_all.triggered.connect(
+        lambda: [plot_mgr.set_scan_visible(p, True) for p, _, _ in plot_mgr.list_scans()])
+
+
+_traces_menu.aboutToShow.connect(_rebuild_traces_menu)
+btn_traces.setMenu(_traces_menu)
+
+# --- PNG export ----------------------------------------------------------
+# pyqtgraph can already do this from its right-click menu, but nobody finds it
+# there. A button makes it discoverable and lets us default the background to
+# WHITE: the on-screen theme is dark, and a dark PNG is rarely what you want
+# in a report or a paper.
+btn_save_png = _btn("Save PNG")
+btn_save_png.setToolTip(
+    "Save the plot as a PNG image.\n"
+    "The exported image uses a WHITE background (the dark on-screen theme is "
+    "for the screen); for full control over size and background use the "
+    "right-click menu on the plot -> Export.")
+
+
+def _save_plot_png():
+    """Export the scope to PNG via pyqtgraph's ImageExporter."""
+    default = time.strftime("plot_%Y%m%d_%H%M%S.png")
+    start_dir = entry_export_dir.text() or os.getcwd()
+    path, _ = QtWidgets.QFileDialog.getSaveFileName(
+        _window, "Save plot as PNG", os.path.join(start_dir, default),
+        "PNG image (*.png)")
+    if not path:
+        return
+    if not path.lower().endswith(".png"):
+        path += ".png"
+    try:
+        import pyqtgraph.exporters as pgexp
+        ex = pgexp.ImageExporter(_plot_item)
+        ex.parameters()['width'] = 1600          # sensible print resolution
+        # Temporarily switch to a light background for the export only.
+        old_bg = _plot_widget.backgroundBrush()
+        _plot_widget.setBackground('w')
+        for ax in ("bottom", "left"):
+            _plot_item.getAxis(ax).setPen(pg.mkPen('k'))
+            _plot_item.getAxis(ax).setTextPen(pg.mkPen('k'))
+        app.processEvents()
+        ex.export(path)
+        # ...and restore the dark theme.
+        _plot_widget.setBackground(old_bg)
+        for ax in ("bottom", "left"):
+            _plot_item.getAxis(ax).setPen(pg.mkPen(C_BORDER))
+            _plot_item.getAxis(ax).setTextPen(pg.mkPen(C_MUTED))
+        log(f"[PNG] Saved {path}")
+    except Exception as e:
+        log(f"[PNG] Export failed: {e}", "error")
+        a_messagebox.showerror("Save PNG", f"Could not save the image:\n{e}")
+
+
+btn_save_png.clicked.connect(_save_plot_png)
+
+for _w in (btn_traces, btn_save_png, btn_clear_plot):
+    _scope_toolbar.addWidget(_w)
 
 
 # =========================== SECTION: CONNECTION ====================
@@ -1293,7 +1499,7 @@ def _ai_colour(v):
     if v >= AI_ALARM_V:
         return C_ERROR
     if v >= AI_WARN_V:
-        return "#d29922"      # amber
+        return C_AMBER
     return C_OK
 
 
@@ -1318,7 +1524,7 @@ def _apply_ai_value(v):
     frac = 0.0 if AI_BAR_MAX_V <= 0 else max(0.0, min(1.0, v / float(AI_BAR_MAX_V)))
     _ai_bar.setValue(int(frac * 1000))
     _ai_bar.setStyleSheet(
-        f"QProgressBar{{background:{C_BG};border:1px solid #30363d;"
+        f"QProgressBar{{background:{C_BG};border:1px solid {C_BORDER};"
         f"border-radius:3px;}}"
         f"QProgressBar::chunk{{background:{col};border-radius:2px;}}")
     _lbl_ai_max.setText(f"max {_ai_max_v[0]:.4f} V")
@@ -1403,6 +1609,19 @@ _btn_ai_reset.setStyleSheet(
 _btn_ai_reset.setFixedHeight(18)
 _btn_ai_reset.setCursor(QtCore.Qt.CursorShape.PointingHandCursor)
 _btn_ai_reset.setToolTip("Reset the max-hold value")
+
+# Same treatment for the status bar. The AI value refreshes at 4 Hz and is
+# the worst offender; Slip/Temp/max change rarely but shift their neighbours
+# when they do. The AI sample allows for a sign and the bold rendering used
+# for the value.
+# Sample must cover TWO integer digits: the channel range goes to 10 V, so
+# "10.0000 V" occurs in normal use, and a negative offset reading adds a sign.
+# A one-digit sample let the label grow by 4 px as soon as the value went
+# above 9.9999 V, which is exactly the jitter this is meant to prevent.
+_apply_tabular_numbers(_lbl_ai,     "AI (SIM): -88.8888 V", 6)
+_apply_tabular_numbers(_lbl_ai_max, "max -88.8888 V", 4)
+_apply_tabular_numbers(_lbl_slip,   "Slip: 8.888 nm", 4)
+_apply_tabular_numbers(_lbl_temp,   "Temp: 888 °C", 4)
 
 _ai_group = QtWidgets.QWidget()
 _ai_lay = QtWidgets.QHBoxLayout(_ai_group)
@@ -1546,7 +1765,7 @@ def on_connect():
             set_fsm("IDLE")
             log("[SIM] Virtual FAULHABER connected — no hardware. DAQ uses simulator.")
             init_motor()
-            log("[OK] Motor initialized (EN, V0, ANSW, ramp).")
+            log("[OK] Motor initialized (EN, %sV0, ANSW, ramp)." % ("HP0, " if SEND_LEGACY_HP0 else ""))
         except Exception as e:
             log(f"[ERROR] SIM connect failed: {e}", "error")
             state["ser"] = None
@@ -1563,7 +1782,7 @@ def on_connect():
         log(f"[OK] Connected {port} @ {baud} baud")
         drain_stale_serial(ser)
         init_motor()
-        log("[OK] Motor initialized (EN, V0, ANSW, ramp).")
+        log("[OK] Motor initialized (EN, %sV0, ANSW, ramp)." % ("HP0, " if SEND_LEGACY_HP0 else ""))
         _prompt_reference_run_then_lambda()
     except Exception as e:
         log(f"[ERROR] Could not open {port}: {e}", "error")
@@ -2229,8 +2448,17 @@ def _update_avg_hint():
         if d and d > 0:
             n_reads = state.get('last_avg_reads')
             if n_reads:
-                txt += (f"<br>Last point: {d*1000:.0f} ms, {n_reads} reads "
-                        f"({n_reads/d:.1f} Hz).")
+                # Only quote a rate when the measurement lasted long enough for
+                # it to mean anything. With Timebase 0 the whole point takes
+                # well under a millisecond and the division produced absurd
+                # figures like "249661.0 Hz" in the rig screenshot -- a number
+                # that is arithmetically correct and physically meaningless.
+                if d >= 0.01:
+                    txt += (f"<br>Last point: {d*1000:.0f} ms, {n_reads} reads "
+                            f"({n_reads/d:.1f} Hz).")
+                else:
+                    txt += (f"<br>Last point: {d*1000:.1f} ms, {n_reads} reads "
+                            f"(too short to quote a rate).")
             else:
                 txt += f"<br>Last point measured in {d*1000:.0f} ms."
     except Exception:
