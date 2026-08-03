@@ -1,0 +1,67 @@
+--- a/scan_engine.py
++++ b/scan_engine.py
+@@ -390,6 +390,23 @@
+             grid_anchor_steps = read_position()
+             grid_slack_steps = 0
+             grid_index = 0
++            # [DIAG] Scan-start snapshot -- diagnostic logging only, no
++            # behaviour change. Records the state that decides whether THIS
++            # scan's jump-to-start received backlash compensation, which is
++            # what a rigid scan-to-scan wavelength offset would come from.
++            # last_move_direction is mutated by every move in the program
++            # (Goto, Jog -- which IS a Goto --, Reference Run), so a single
++            # jog between two scans can flip it and give one scan a
++            # compensation the previous one did not get.
++            # Remove once the offset investigation is closed.
++            try:
++                log(f"[DIAG] scan-start anchor_pos={grid_anchor_steps} "
++                    f"start_nm={s_nm:.4f} dir={direction:+d} "
++                    f"last_move_direction={state.get('last_move_direction')} "
++                    f"slip_nm={ui_get('slip_nm_var', '0')} "
++                    f"src={daq_source_label()}")
++            except Exception:
++                pass
+             while (direction > 0 and pos_nm <= e_nm + SCAN_EPSILON_NM) or (direction < 0 and pos_nm >= e_nm - SCAN_EPSILON_NM):
+                 if state["stop_flag"]:
+                     safe_stop(); log("[STOP] Scan aborted"); break
+@@ -401,7 +418,30 @@
+                 v = acquire_measurement(dwell)
+                 if state.get('active_plot_id'):
+                     _plot().append_scan_point(state['active_plot_id'], pos_nm, v)
++                # [DIAG] POS is read HERE now instead of just before the move
++                # further down. Same value (nothing moves between the two
++                # points) and the same number of serial round-trips -- the read
++                # was simply moved up and is reused below, so this costs
++                # nothing. It lets the wavelength LABEL and the ENCODER be
++                # logged together for the point that was actually measured.
++                # POS is a free-running absolute counter (init_motor and
++                # recover_after_stop never home the drive), so pos= is directly
++                # comparable ACROSS scans in one session -- that is what makes
++                # a rigid group offset visible.
++                curr_abs = read_position()
+                 log(f"{pos_nm:.3f} nm  |  {v:.5f} V")
++                try:
++                    _enc_nm = s_nm + steps_to_delta_nm(curr_abs - grid_anchor_steps)
++                    log(f"[DIAG] i={grid_index} label_nm={pos_nm:.4f} "
++                        f"pos={curr_abs} enc_nm={_enc_nm:.4f} "
++                        f"lbl_minus_enc_nm={pos_nm - _enc_nm:+.4f} "
++                        f"anchor={grid_anchor_steps} slack={grid_slack_steps} "
++                        f"dir={state.get('last_move_direction')} "
++                        f"reads={state.get('last_avg_reads')} "
++                        f"win_ms={(state.get('last_avg_window_s') or 0)*1000:.1f} "
++                        f"V={v:.5f}")
++                except Exception:
++                    pass
+ 
+                 # Next step
+                 # Stop checkpoint BEFORE issuing the move. acquire_measurement()
+@@ -413,7 +453,8 @@
+                 if state["stop_flag"]:
+                     safe_stop(); log("[STOP] Scan aborted"); break
+                 pos_nm_next = pos_nm + st_nm*direction
+-                curr_abs = read_position()
++                # curr_abs was read right after the measurement above (see
++                # [DIAG] note) and is reused here -- nothing has moved since.
+                 # Backlash compensation on the iteration where the direction
+                 # actually reverses; a no-op every other iteration. It shifts
+                 # the grid (the steps show up in POS) without being optical
