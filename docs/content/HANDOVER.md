@@ -12,9 +12,10 @@
 | Datei | Inhalt |
 |---|---|
 | `CLAUDE.md` | **Doku-/Kommentar-Policy** (verbindlich, jede Session) + Kurzeinstieg |
-| `HANDOVER.md` (hier) | Architektur, rig-bestätigter Stand, Geräte-Eigenheiten |
-| `BACKLOG.md` | Offene Punkte nach Priorität, Defect-Checkliste |
-| `CONTEXT.md` | Technischer Tiefgang: Skalen, Positions-Wahrheiten, Offset-Diagnose |
+| `HANDOVER.md` (hier) | Architektur, rig-bestätigter Stand, Geräte-Eigenheiten (wird überschrieben) |
+| `BACKLOG.md` | Offene Punkte nach Priorität, Defect-Checkliste (wird gepflegt) |
+| `CONTEXT.md` | Technischer Tiefgang: Skalen, Positions-Wahrheiten, Offset-Diagnose (wird überschrieben) |
+| `HISTORY.md` | Chronologisches Log, append-only — nicht bei jedem Prompt lesen, nur bei Bedarf (s. CLAUDE.md) |
 
 **Die verbindliche Doku-/Kommentar-Policy steht jetzt in `CLAUDE.md`** (Punkte
 1–8, wortgleich übernommen). Sie wurde dorthin verschoben, weil Claude Code

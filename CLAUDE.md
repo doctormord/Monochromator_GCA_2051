@@ -17,6 +17,26 @@ Fork von `sk-HTW/monochromator_python_code`.
 | `MANUAL.md` | Vollständiges Handbuch, Single Source (README + PDF werden daraus erzeugt) |
 | `TESTPLAN.md` | Testplan |
 
+## Dokumentationsstruktur
+
+Dieses Projekt pflegt vier Doku-Dateien mit unterschiedlichem Zweck:
+
+- CONTEXT.md — aktueller Projektstand (wird überschrieben)
+- BACKLOG.md — offene Aufgaben (wird gepflegt)
+- HANDOVER.md — Session-Übergabe (wird überschrieben)
+- HISTORY.md — chronologisches Log, append-only
+
+Regeln für HISTORY.md:
+- Am Ende jeder Arbeitssession einen neuen Eintrag mit Datum (## YYYY-MM-DD)
+  anhängen, der zusammenfasst: was gemacht wurde, welche Entscheidungen
+  getroffen wurden und warum, was noch offen ist.
+- NIE bestehende Einträge in HISTORY.md verändern oder löschen — nur anhängen.
+- Bei Bedarf (z.B. neue Session, unklarer Kontext) darf HISTORY.md gelesen
+  werden, um frühere Entscheidungen nachzuvollziehen — aber nicht automatisch
+  bei jedem Prompt, nur wenn CONTEXT.md/HANDOVER.md nicht ausreichen.
+- Am Ende jeder Session: HANDOVER.md und CONTEXT.md aus dem aktuellen Stand
+  neu schreiben, HISTORY.md nur ergänzen.
+
 ## ⚠️ VERBINDLICHE DOKU-/KOMMENTAR-POLICY (gilt für jede Session, jede Datei)
 
 Diese Regel steht bewusst ganz oben — jede künftige Session (auch eine andere
