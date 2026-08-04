@@ -1,7 +1,10 @@
 # CONTEXT.md — VRS41: technischer Tiefgang
 
 > Verdichtung aus mehreren Chat-Exports + HANDOVER/BACKLOG/HANDOFF-Ständen.
-> Stand: 2026-07-31 (Offset-Diagnose-Session eingearbeitet).
+> Stand: 2026-08-04 (SIM-Diagnose- und Fix-Session eingearbeitet — Defect
+> A/B code-seitig behoben und in SIM verifiziert, Defect C mit Re-Anchor
+> entschärft, ein vierter Fund (Stop/GoTo-Race) dabei entdeckt und ebenfalls
+> behoben. Alles NUR in SIM verifiziert — Rig-Session steht noch aus).
 >
 > **Abgrenzung:** Architektur und rig-bestätigter Stand stehen in `HANDOVER.md`,
 > die Aufgabenliste in `BACKLOG.md`. Hier steht nur, was zum *Verstehen* der
@@ -72,31 +75,99 @@ zusammen (15:12:01 → 15:12:42). Drei Traces bei 15:10:5x sind Abbrüche
 - **Mechanische Relaxation nach Positionsmeldung.** War Leithypothese, vom
   Statiktest widerlegt.
 
-### Die drei Defekte im Detail
+### Die drei Defekte im Detail — Stand nach der SIM-Fix-Session 2026-08-04
 
-*(Checkliste und Fix-Reihenfolge in `BACKLOG.md` P0 — hier die Begründung.)*
+*(Checkliste und Status in `BACKLOG.md` P0 — hier die Begründung. Alles unten
+NUR in SIM verifiziert, mit `sim_defect_probe.py`, Ergebnisse dort im Kopf-
+Docstring zusammengefasst. Rig-Session steht noch aus — SIM beweist die
+Codepfade, nicht reale Motor-Timing/`LR`-Sollwert-Feinheiten, s. HANDOVER.md.)*
 
-**Defect A — Stepped Scan re-ankert nicht nach Abort.** Bei `if not
-wait_until_position(...): safe_stop(); break` bleiben `current_nm`/`entry_current`
-auf dem letzten *geplotteten* Punkt, während der Antrieb über die DEC-Rampe
-weiterläuft. `free_run_worker` hat genau diese Rückführung
-(`real_nm = s_nm + steps_to_delta_nm(final_pos - nm_anchor_steps)`) — der Fix
-wurde nur an einem von zwei Pfaden gemacht.
+**Defect A — Stepped Scan re-ankert nicht nach Abort. BEHOBEN.** Bei `if not
+wait_until_position(...): safe_stop(); break` blieben `current_nm`/
+`entry_current` auf dem letzten *geplotteten* Punkt, während der Antrieb über
+die DEC-Rampe weiterlief. `free_run_worker` hatte genau diese Rückführung
+(`real_nm = s_nm + steps_to_delta_nm(final_pos - nm_anchor_steps)`) —
+`scan_worker` jetzt auch, an der `break`-Stelle selbst (mit dem *nur
+bestätigten* Slack-Anteil vor diesem Schritt ausgeschlossen, da bei einem
+Abbruch nicht bekannt ist, wie viel des tatsächlichen Teilwegs Spiel-Aufnahme
+war). Zusätzlich am `while`-Schleifenende (`else:`-Zweig, läuft nur bei
+normalem Abschluss, nie nach `break`) eine Verifikation gegen die reale
+Encoder-Position eingebaut — dieselbe Lücke gab es identisch in `do_resume()`,
+dort ebenfalls behoben. SIM-Ergebnis: `label - true_nm nach Stop = +0.00000`.
 
-**Defect B — Go To fährt nach Stop weiter, mit stalem Ursprung.** Nach
-`[STOP] Motion interrupted` liest `goto_worker` erneut `entry_current.get()`
-(nie aktualisiert), rechnet das Delta vom *ursprünglichen* Startpunkt und löst
-eine zweite Bewegung aus → Overshoot ≈ bereits gefahrene Strecke, danach wird
-das Ziel als Istwert geschrieben. Das ist der gemeldete Dial-vs-Software-Bug,
-skaliert mit Move-Länge.
+**Defect B — Go To fährt nach Stop weiter, mit stalem Ursprung. BEHOBEN.**
+Nach `[STOP] Motion interrupted` las `goto_worker` erneut `entry_current.get()`
+(nie aktualisiert), rechnete das Delta vom *ursprünglichen* Startpunkt und löste
+eine zweite Bewegung aus → Overshoot ≈ bereits gefahrene Strecke, danach wurde
+das Ziel als Istwert geschrieben. Fix: ein Anker-Paar (Schritte, nm) wird am
+Anfang von `goto_worker` erfasst; im Interrupted-Zweig wird die wahre aktuelle
+Wellenlänge daraus (nicht aus dem stalen Textfeld) berechnet, das Label sofort
+aktualisiert, und erst dann das Retry-Delta gebildet. SIM-Ergebnis (8-nm-Move,
+Stop bei ~33 %): Label sprang vorher fälschlich nicht mit; jetzt korrekt
+`523.000 → 525.720 nm`, Retry erreicht danach sauber das echte Ziel.
+**Offen:** `LR` ist laut Handbuch relativ zum letzten *kommandierten*
+Sollwert, nicht zur Istposition (s. HANDOVER.md) — SIMs `FakeFaulhaber`
+bildet diese Feinheit nicht nach, das kann nur ein Rig-Test zeigen (T4).
 
-**Defect C — Kompensation im Ziel, nicht im Label** (wahrscheinlichste
-Offset-Ursache). `comp = reversal_compensation_steps(direction)` geht in
+**Vierter Fund (beim Verifizieren von B entdeckt) — Stop/GoTo-Race. BEHOBEN.**
+`stop_action()` wartete vor dem Re-Arm (`recover_after_stop()`, löscht
+`stop_flag`) nur auf `state['is_scanning']` — das setzt aber nur Scan/Free-Run,
+nie GoTo. Ein Stop während eines GoTo löschte `stop_flag` fast sofort, oft
+BEVOR `goto_worker`s eigene `wait_until_position()`-Poll-Schleife ihn je True
+sah — das Log zeigte sofort „Recovered after STOP; ready.", während der GoTo
+im Hintergrund einfach weiterlief, bis sein volles Move-Timeout ablief (bis zu
+`MAX_MOVE_TIMEOUT` = 900 s). Per Live-Thread-Stack-Dump in SIM verifiziert
+(`goto_worker` stand 18+ s nach dem Stop noch in `wait_until_position()`).
+Fix: neues `state['is_moving']`-Flag (analog `is_scanning`), von `goto_worker`
+gesetzt/gelöscht, `stop_action()` wartet jetzt auf beide. Ein direkt damit
+zusammenhängender zweiter Bug: `recover_after_stop()` setzt `fsm` unbedingt
+auf `IDLE` — wenn `goto_worker` es beim Auto-Recover-Retry selbst aufruft,
+zeigte `fsm` fälschlich „IDLE", während der Retry-Move noch lief. Auch behoben
+(`set_fsm("MOVING")` direkt nach dem `recover_after_stop()`-Aufruf im
+Interrupted-Zweig).
+
+**Defect C — Kompensation im Ziel, nicht im Label. TEILWEISE ENTSCHÄRFT, KEIN
+vollständiger Fix.** `comp = reversal_compensation_steps(direction)` geht in
 `grid_slack_steps` → `target_abs`, aber **nicht** in `pos_nm` (Plot-/CSV-Label).
-Korrekt *unter der Annahme*, dass Kompensation reines Spiel-Aufnehmen ohne
-optische Bewegung ist. Ist die Annahme oder der Slip-Wert falsch, verschiebt
-sich der ganze Scan starr um bis zu 1 Slip (0.080 nm). `last_move_direction`
-wird von **jedem** Move mutiert → ein Jog zwischen zwei Scans kippt es.
+Das ist *by design* korrekt, solange die Annahme stimmt, dass Kompensation
+reines Spiel-Aufnehmen ohne optische Bewegung ist — und genau das war die
+offene Frage.
+
+Sauber in SIM durchgerechnet (nicht nur behauptet, s. `sim_defect_probe.py`
+Kopf-Docstring): Bei jedem Reversal-Move, der die modellierte Backlash-Breite
+voll überschreitet, konvergiert `sim_hardware`s optische Position **immer**
+gegen `(pos_vorher + kommandiertes_delta)` — **unabhängig vom verwendeten
+Kompensationswert**. Der Label-vs-Optik-Fehler skaliert also mit
+`(konfigurierter slip_nm − echter Backlash)`, **nicht** mit dem Backlash
+selbst. Die erste, scheinbar sehr saubere Messung dieser Session
+(`label - optical_truth = +0.082 nm`, exakt `SIM_BACKLASH_NM`) war dadurch
+verunreinigt, dass genau in diesem Testlauf der bereits katalogisierte,
+bewusst nicht angefasste P3-Bug „Scan überfährt End um einen Step"
+(`BACKLOG.md` P3) mit hineinspielte — die Messung lief nicht am wahren
+Scan-Ende, sondern einen Schritt zu weit.
+
+**Was tatsächlich gefixt wurde:** Re-Anchor (nicht Blind-Addition) — nach
+jedem erfolgreichen GoTo und am Ende jedes Scans wird das Label gegen die
+reale (kompensations-bereinigte) Encoder-Position verifiziert, nach demselben
+Muster wie `free_run_worker`s bestehende Rückführung (`nm_anchor_steps =
+start_steps_abs + comp_steps`, um Slack-Schritte aus der nm-Rechnung
+auszuschließen — genau das, was den historischen Free-Run-Bug
+`587.000 → 586.918 nm` = 1 Slip behoben hatte). Explizit **nicht** gewählt:
+`comp` blind ins Label addieren — das wäre bei korrekt kalibriertem
+`slip_nm` falsch und würde den historischen Free-Run-Bug wieder aufmachen.
+
+**Warum das KEIN vollständiger Fix ist:** Für einen Move, der sein
+kommandiertes Ziel exakt erreicht, ist die reine Grid-Arithmetik (`pos_nm =
+s_nm + step×index`) algebraisch bereits identisch mit der
+kompensations-bereinigten Encoder-Umrechnung — der Re-Anchor ist dann ein
+No-Op (bestätigt in SIM). Er fängt echte `POS_TOL_STEPS`-Anlauf-Toleranz ab
+und dient als Verifikations-/Log-Sicherheitsnetz, kann aber eine
+`slip_nm`-Fehlkalibrierung strukturell **nicht** beseitigen — dafür gibt es
+auf echter Hardware keine unabhängige optische Rückmeldung (kein
+Absolutsensor, s. „Zwei Eigenschaften" in HANDOVER.md). Der real am Rig
+beobachtete ~0.07 nm-Offset kann also NUR über eine Rig-Kalibrierprüfung von
+`slip_nm` (`backlash_cal.py`, gegen den echten Backlash) weiter reduziert
+werden — das ist der eigentliche nächste Schritt für C, kein Code-Fix mehr.
 
 Korroboration aus dem Code selbst: der Free-Run-Fix-Kommentar nennt
 `587.000 → 586.918 nm` = **0.082 nm** = 1 Slip. Dieselbe Fehlerklasse gab es in
@@ -114,19 +185,22 @@ gesamten Diagnose.
 Gitterbewegung. Ein Nullbefund im Encoder-Frame schließt Stiction nicht aus —
 das bräuchte einen optischen Test.
 
-### Hypothesen (rangiert)
+### Hypothesen (rangiert) — Stand vor der Rig-Session, jetzt Fix-Verifikation statt Diagnose
 
-| # | These | Signatur | Falsifikation |
-|---|---|---|---|
-| H1 | Defect C: Komp. im Ziel, nicht im Label | Offset = exakt 1 Slip; weg bei Slip=0 | T2 |
-| H2 | Defect A: Abbruch vergiftet Ursprung | Offset nach Abbruch, **bleibt**; Betrag = Auslaufstrecke, nicht Slip | T3 |
-| H3 | Jog kippt `last_move_direction` | Offset nach Jog, bleibt | T1 |
-| H4 | echte optische Bewegung | Offset auch im **Encoder**-Frame | Diag-Patch |
-| H5 | etwas anderes im manuellen Workflow | nichts reproduziert | alle Tests negativ |
+| # | These | Signatur | Falsifikation | Code-Status |
+|---|---|---|---|---|
+| H1 | Defect C: Komp. im Ziel, nicht im Label | Offset = exakt 1 Slip; weg bei Slip=0 | T2 | Re-Anchor ergänzt, Rest ist Kalibriersache (s. oben) |
+| H2 | Defect A: Abbruch vergiftet Ursprung | Offset nach Abbruch, **bleibt**; Betrag = Auslaufstrecke, nicht Slip | T3 | Behoben (SIM) |
+| H3 | Jog kippt `last_move_direction` | Offset nach Jog, bleibt | T1 | Unverändert — Jog ist ein Go To, profitiert vom B-Fix |
+| H4 | echte optische Bewegung | Offset auch im **Encoder**-Frame | Diag-Patch | Kann `sim_hardware` naturgemäß nicht ausschließen — Rig-Frage |
+| H5 | etwas anderes im manuellen Workflow | nichts reproduziert | alle Tests negativ | — |
 
 H1/H2/H3 erzeugen alle „innerhalb kongruent, zwischen Gruppen starr versetzt".
 Unterschieden werden sie über den **Auslöser** und darüber, **ob der Betrag
-gleich dem Slip ist**.
+gleich dem Slip ist**. Da A und B jetzt code-seitig behoben sind, dient die
+ausstehende Rig-Session nicht mehr primär der Unterscheidung, sondern der
+**Verifikation**, dass der reale ~0.07 nm-Offset dadurch tatsächlich
+verschwindet bzw. sich auf die `slip_nm`-Kalibrierabweichung reduziert (H1-Rest).
 
 ### Entscheidender Messansatz
 
@@ -155,14 +229,14 @@ innerhalb eines Scans nie) · `[SLIP]`-Zeile erscheint vor der einen Gruppe, vor
 der anderen nicht (kommt vom Sprung-zum-Start, nicht aus der Scan-Schleife) ·
 `pos` am Peak differiert um ~28 941 Schritte · `label_nm` am Peak **identisch**.
 
-### Testprotokoll
+### Testprotokoll — jetzt Fix-Verifikation (T3/T4 sollten nach dem A/B-Fix negativ ausfallen)
 
 | Test | Zweck |
 |---|---|
-| T1 | Offset ohne Avg-Änderung provozieren: 2 Baseline-Scans → **GUI-Jog** +/− → 2 Scans → 1 Scan. Prüft H3 |
-| T2 | Slip-Feld = 0, T1 wiederholen. Offset weg → H1; Offset bleibt → H1 tot |
-| T3 | 2 Baseline → langer Go To ≥5 nm mit Stop mittendrin → 2 Scans ohne Korrektur. Prüft H2 |
-| T4 | Go To ≥20 nm, Stop bei ~50 %, Dial vs. Software protokollieren. Defect B |
+| T1 | Offset ohne Avg-Änderung provozieren: 2 Baseline-Scans → **GUI-Jog** +/− → 2 Scans → 1 Scan. Prüft H3, verbleibende C-Restgröße |
+| T2 | Slip-Feld = 0, T1 wiederholen. Offset weg → H1 vollständig entkräftet; Offset bleibt → Rest ist mechanisch oder H3 |
+| T3 | 2 Baseline → langer Go To ≥5 nm mit Stop mittendrin → 2 Scans ohne Korrektur. **Sollte nach dem A-Fix keinen bleibenden Offset mehr zeigen** — wenn doch, ist der SIM-Fix am Rig unvollständig |
+| T4 | Go To ≥20 nm, Stop bei ~50 %, Dial vs. Software protokollieren. **Sollte nach dem B-Fix + Stop/GoTo-Race-Fix sofort abbrechen** (nicht erst nach dem vollen Move-Timeout) und korrekt re-ankern — genau die `LR`-Sollwert-Feinheit prüfen, die SIM nicht abbildet (s. HANDOVER.md) |
 | T5 | Konsolen-Log nach `[SLIP] Reversal` grep'en — entschiede H1 ohne Rig-Zeit, **aber das Log vom 29.07. wurde nicht mitgeschnitten** → aktuell nicht durchführbar |
 
 Für T1 die **GUI-Jog-Buttons** benutzen (s. „Jog ist ein Go To" oben) — ein
@@ -179,6 +253,23 @@ DAQ-Read von ~29 ms das Budget um 3×, die Avg-Settings sind dann wirkungslos).
 Fährt `gui_main`/`scan_engine` **nicht** (Qt-Widgets verschweißt; Stubs kämen
 sonst in den Messpfad). Beweist Physik + Arithmetik, **nicht** was `gui_main`
 tut. Defect A/B brauchen T3/T4 + Log.
+
+### `sim_defect_probe.py` (neu, 2026-08-04) — fährt `gui_main` doch
+
+Anders als `offset_probe.py`: importiert `gui_main` headless unter
+`QT_QPA_PLATFORM=offscreen` (kein Xvfb nötig, macOS hat das nicht — Qts
+eigenes Offscreen-Backend reicht) und ruft `scan_engine.goto_wavelength_action()`
+/`scan_action()`/`stop_action()` **direkt** auf den echten, laufenden
+Objekten auf — kein Stub im Messpfad, weil gar nichts gestubbt wird. Ground
+Truth kommt direkt aus `state['ser']._pos`/`._optical_pos` (nur in SIM
+verfügbar), umgerechnet über die echte `motion.steps_to_delta_nm()`.
+Watchdog per `faulthandler.dump_traceback_later()` pro Sektion — ein
+hängender Thread dumpt seinen Stack und die Sektion bricht hart ab, statt
+still zu hängen (damit wurden sowohl der Stop/GoTo-Race-Bug als auch mehrere
+Timing-Fallstricke im Test selbst gefunden, s. Kopf-Docstring der Datei).
+**Grenze:** beweist Codepfade und Bookkeeping, nicht reale Motor-Timing oder
+die `LR`-Sollwert-Feinheit nach einem harten Stop (s. HANDOVER.md) — dafür
+bleibt die Rig-Session nötig.
 
 ---
 
@@ -205,3 +296,7 @@ tut. Defect A/B brauchen T3/T4 + Log.
 - `Helium-*.md` — Kalibrierlinien-Referenz
 - Offset-Diagnose-Session 2026-07-29/31 — Defect A/B/C, `stage1_diag.patch`,
   `offset_probe.py`, beide PDFs
+- SIM-Diagnose- und Fix-Session 2026-08-04 — Defect A/B code-seitig behoben,
+  Defect C mit Re-Anchor entschärft (kein vollständiger Fix, s. oben),
+  Stop/GoTo-Race + fsm-während-Retry-Bug gefunden und behoben,
+  `sim_defect_probe.py` erstellt. Alles NUR SIM-verifiziert.

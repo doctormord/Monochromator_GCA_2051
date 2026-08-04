@@ -1,7 +1,7 @@
 # BACKLOG — VRS41
 
 > Lebendes Dokument. Überschreiben, nicht anhäufen. Priorität: P0 = jetzt, P3 = später.
-> Stand: 2026-08-04.
+> Stand: 2026-08-04. SIM-Diagnose- und Fix-Session eingearbeitet.
 >
 > **Diese Datei ist die Aufgabenliste.** Beobachtung, Ausschlussbegründungen,
 > Hypothesentabelle, Messansatz und Testprotokoll zum P0-Thema stehen in
@@ -9,50 +9,101 @@
 
 ## P0 — Wellenlängen-Offset ~0.07 nm zwischen Scan-Gruppen
 
-Einziger aktiver Arbeitsstrang. **Kein Fix committet.**
+Defect A und B sind code-seitig behoben und **in SIM verifiziert**
+(`sim_defect_probe.py`) — kein Rig-Test bisher. Defect C ist mit einem
+Re-Anchor entschärft, aber strukturell kein vollständiger Fix (Begründung in
+`CONTEXT.md`). Ein vierter, vorher unbekannter Bug (Stop/GoTo-Race) wurde beim
+Verifizieren von B gefunden und ebenfalls behoben. **Nächster Schritt ist die
+Rig-Session**, nicht mehr die Ursachendiagnose.
 
-Kurzfassung: Scans derselben Linie sind innerhalb einer Gruppe deckungsgleich,
-zwischen Gruppen starr um ~0.07 nm verschoben. Avg-Fenster, Thermodrift,
-Backlash-Streuung, RC-Zeitkonstanten und mechanische Relaxation sind als Ursache
-ausgeschlossen (Begründungen in `CONTEXT.md`). Drei Defekte in `scan_engine.py`
-sind gegen den Volltext verifiziert:
+Kurzfassung des Ausgangsbefunds: Scans derselben Linie sind innerhalb einer
+Gruppe deckungsgleich, zwischen Gruppen starr um ~0.07 nm verschoben.
+Avg-Fenster, Thermodrift, Backlash-Streuung, RC-Zeitkonstanten und
+mechanische Relaxation sind als Ursache ausgeschlossen (Begründungen in
+`CONTEXT.md`).
 
-- [ ] **Defect A — Stepped Scan re-ankert nicht nach Abort.**
-      `current_nm`/`entry_current` bleiben auf dem letzten geplotteten Punkt,
-      während der Antrieb über die DEC-Rampe weiterläuft. `free_run_worker` hat
-      die Rückführung, `scan_worker` nicht — der Fix wurde nur an einem von zwei
-      Pfaden gemacht.
-      ⚠️ **Nicht vor der Datenerhebung fixen** (Reihenfolge s. unten).
+- [x] **Defect A — Stepped Scan re-ankert nicht nach Abort. Behoben (SIM).**
+      `current_nm`/`entry_current` blieben auf dem letzten geplotteten Punkt,
+      während der Antrieb über die DEC-Rampe weiterlief. `free_run_worker` hatte
+      die Rückführung, `scan_worker` nicht. Jetzt ergänzt: Re-Anchor an der
+      `break`-Stelle (nur bestätigter Slack ausgeschlossen, s. Code-Kommentar)
+      sowie am normalen Scan-Ende (`while`/`else`, voller Slack ausgeschlossen).
+      Dieselbe Lücke gab es identisch in `do_resume()` — dort ebenfalls
+      gefixt. SIM: `label - true_nm nach Stop = +0.00000`.
+      Rig-Verifikation offen (TESTPLAN.md 3c / T3 aus CONTEXT.md).
 
-- [ ] **Defect B — Go To fährt nach Stop weiter, mit stalem Ursprung.**
-      `goto_worker` rechnet das Delta erneut vom nie aktualisierten
+- [x] **Defect B — Go To fährt nach Stop weiter, mit stalem Ursprung. Behoben (SIM).**
+      `goto_worker` rechnete das Delta erneut vom nie aktualisierten
       `entry_current` → zweite Bewegung, Overshoot ≈ bereits gefahrene Strecke.
-      Das ist der gemeldete Dial-vs-Software-Bug, skaliert mit Move-Länge.
-      **Beim Fix beachten:** `LR` ist laut Handbuch relativ zum letzten
-      *kommandierten Sollwert*, nicht zur Istposition — ein aus `POS`
-      gerechnetes `LR` ist nach einem harten Stop nicht automatisch korrekt.
-      Braucht Rig-Verifikation.
+      Fix: Anker-Paar (Schritte, nm) am Worker-Start erfasst, im
+      Interrupted-Zweig daraus die wahre aktuelle Wellenlänge berechnet (nicht
+      aus dem stalen Feld), Label sofort aktualisiert. SIM (8 nm Move, Stop
+      bei ~33 %): Label korrekt `523.000 → 525.720 nm`, Retry erreicht sauber
+      das Ziel.
+      **Weiterhin offen:** `LR` ist laut Handbuch relativ zum letzten
+      *kommandierten Sollwert*, nicht zur Istposition — `sim_hardware`
+      bildet diese Feinheit nicht nach. Nur ein Rig-Test (T4) kann zeigen, ob
+      ein aus `POS` berechnetes `LR` nach einem harten Stop wirklich korrekt
+      ist, oder ob dafür ein Absolut-Move (`LA`) nötig wäre.
 
-- [ ] **Defect C — Kompensation im Ziel, nicht im Label.**
-      Wahrscheinlichste Offset-Ursache. `reversal_compensation_steps()` geht in
-      `target_abs`, aber nicht in `pos_nm` (Plot-/CSV-Label) → bei falscher
-      Annahme oder falschem Slip-Wert verschiebt sich der ganze Scan starr um
-      bis zu 1 Slip (0.080 nm). `last_move_direction` wird von **jedem** Move
-      mutiert, ein Jog zwischen zwei Scans kippt es.
+- [x] **Vierter Fund — Stop/GoTo-Race. Behoben (SIM), beim Verifizieren von B entdeckt.**
+      `stop_action()` wartete vor dem Re-Arm nur auf `state['is_scanning']`
+      (setzt nur Scan/Free-Run, nie GoTo) → ein Stop während eines GoTo
+      löschte `stop_flag` fast sofort, oft bevor `goto_worker`s eigene
+      `wait_until_position()`-Poll ihn je sah. Folge: die Konsole zeigte
+      sofort "Recovered after STOP; ready.", während der GoTo bis zu
+      `MAX_MOVE_TIMEOUT` (900 s) im Hintergrund weiterlief. Per
+      Live-Thread-Stack-Dump in SIM verifiziert. Fix: neues
+      `state['is_moving']`-Flag (`app_context.py`), `stop_action()` wartet
+      jetzt auf `is_scanning` ODER `is_moving`. Zusätzlich behoben: `fsm`
+      zeigte während `goto_worker`s Auto-Recover-Retry fälschlich "IDLE"
+      (weil `recover_after_stop()` es unbedingt zurücksetzt) — jetzt wird
+      `fsm` nach dem Retry-Start wieder auf "MOVING" gesetzt.
+      Rig-Verifikation offen — genau wie bei B ist unklar, ob echtes
+      Motor-/Serial-Timing dieselbe Race-Charakteristik zeigt wie SIM.
+
+- [ ] **Defect C — Kompensation im Ziel, nicht im Label. Re-Anchor ergänzt,
+      KEIN vollständiger Fix möglich.** `reversal_compensation_steps()` geht
+      in `target_abs`, aber nicht in `pos_nm` (Plot-/CSV-Label) — das ist *by
+      design* korrekt, solange Kompensation reines Spiel-Aufnehmen ohne
+      optische Bewegung ist. In SIM sauber durchgerechnet: der Label-Fehler
+      skaliert mit `(konfigurierter slip_nm − echter Backlash)`, nicht mit
+      dem Backlash selbst — die erste "saubere" Messung dieser Session
+      (`+0.082 nm`, exakt `SIM_BACKLASH_NM`) war durch den P3-Bug "Scan
+      überfährt End um einen Step" verunreinigt (s. P3 unten). Ergänzt:
+      Re-Anchor gegen die kompensations-bereinigte Encoder-Position nach
+      jedem GoTo und am Scan-Ende (Muster wie `free_run_worker`), **nicht**
+      blinde Addition von `comp` ins Label (das wäre bei korrekter
+      Kalibrierung falsch und würde den historischen Free-Run-Bug
+      `587.000 → 586.918 nm` wiederherstellen). Für exakt erreichte Moves ist
+      dieser Re-Anchor mathematisch ein No-Op — er kann eine
+      `slip_nm`-Fehlkalibrierung strukturell **nicht** beseitigen, dafür
+      fehlt eine unabhängige optische Rückmeldung auf echter Hardware.
+      **Der eigentliche nächste Schritt ist kein Code-Fix mehr:** `slip_nm`
+      am Rig gegen den echten Backlash verifizieren/kalibrieren
+      (`backlash_cal.py`).
 
 ### Arbeitsschritte
 
 - [x] `stage1_diag.patch` angewendet (fertig, verifiziert: 3 Hunks, additiv,
       `try/except: pass`, `read_position()`-Calls 10→10, `patch --dry-run`
       bestätigt sauberen, vollständig applizierten Stand)
-- [ ] Session mit reproduziertem Offset mitschneiden
-- [ ] `grep "\[DIAG\]"` gegen die Entscheidungstabelle in `CONTEXT.md` auswerten
-- [ ] T1–T4 nach Testprotokoll (`CONTEXT.md`) fahren — Vorbedingungen beachten
-- [ ] Fix-Commits für den Defekt schreiben, den die Daten tatsächlich belasten
-
-**Reihenfolge — wichtig:** Defect A nicht vor der Datenerhebung fixen. Ein
-Rückanker nach Abbruch ändert genau den Ursprung, dessen Vergiftung Hypothese H2
-nachweisen soll. Erst messen, dann fixen.
+- [x] SIM-Session mit `sim_defect_probe.py`: alle drei Defekte plus der
+      Stop/GoTo-Race reproduziert, A/B/Race gefixt, C entschärft (s. oben)
+- [ ] **Rig-Session** (jetzt der kritische Pfad, ersetzt die vorherige
+      "Session mit reproduziertem Offset mitschneiden"):
+      - [ ] T3/T4 aus `CONTEXT.md` fahren — sollten nach dem A/B/Race-Fix
+            keinen bleibenden Offset mehr zeigen bzw. sofort (nicht erst nach
+            vollem Timeout) abbrechen. Falls doch: SIM-Fix am Rig unvollständig,
+            zurück zu `CONTEXT.md`.
+      - [ ] `slip_nm` gegen echten Backlash verifizieren (`backlash_cal.py`) —
+            das ist der Schritt, der Defect C tatsächlich schließt.
+      - [ ] TESTPLAN.md Section 3c (10 gequeute Scans) — Ergebnis muss "kein
+            monotoner Trend" zeigen.
+      - [ ] SIM-Smoke-Test vor der Rig-Session zur Kontrolle erneut laufen
+            lassen (`sim_defect_probe.py`).
+- [ ] T1/T2 aus `CONTEXT.md` fahren, um die verbleibende C-Restgröße
+      (Kalibrierabweichung) zu quantifizieren.
 
 **T5 aktuell nicht durchführbar:** das Konsolen-Log vom 29.07. (15:00–15:30)
 wurde nicht mitgeschnitten.
@@ -61,14 +112,19 @@ wurde nicht mitgeschnitten.
 
 | Artefakt | Status |
 |---|---|
-| `stage1_diag.patch` | **angewendet** in `scan_engine.py` (3 Hunks, additiv, `try/except: pass`, `read_position()`-Calls 10→10, `patch --dry-run` bestätigt sauberen Stand) — wartet auf Session-Mitschnitt |
+| `stage1_diag.patch` | **angewendet** in `scan_engine.py` (3 Hunks, additiv, `try/except: pass`, `read_position()`-Calls 10→10, `patch --dry-run` bestätigt sauberen Stand) |
 | `stage1_patch_guide.pdf` | Erklärung des Patches (EN) |
 | `offset_report.pdf` | Diagnose + Hypothesen + T1–T5 (EN) |
 | `offset_probe.py` | automatisierte Erhebung; Selftest grün (80 pm injiziert → 80.2 pm in `nm_app`, 0.2 pm in `nm_enc`); Hardware-Hälfte unverifiziert |
+| `sim_defect_probe.py` | **neu (2026-08-04).** Fährt `gui_main`/`scan_engine` direkt, headless (`QT_QPA_PLATFORM=offscreen`, kein Xvfb nötig). Hat A/B + den Stop/GoTo-Race reproduziert und die Fixes bestätigt (`label - true_nm nach Stop = +0.00000`); Ground Truth aus `state['ser']._pos`/`._optical_pos` (nur in SIM). Watchdog via `faulthandler` pro Sektion. Details im Kopf-Docstring der Datei. |
 
 `offset_probe.py` fährt `gui_main`/`scan_engine` **nicht** (Qt-Widgets
 verschweißt; Stubs kämen sonst in den Messpfad). Es beweist Physik und
-Arithmetik, nicht das Verhalten von `gui_main`. Defect A/B brauchen T3/T4 + Log.
+Arithmetik, nicht das Verhalten von `gui_main`. `sim_defect_probe.py` schließt
+genau diese Lücke — fährt `gui_main` direkt, beweist aber wiederum nur
+Codepfade/SIM-Physik, nicht reales Motor-Timing oder die `LR`-Sollwert-
+Feinheit nach einem harten Stop. Beide zusammen brauchen weiterhin T3/T4 + Log
+am Rig zur Bestätigung.
 
 ---
 
@@ -145,7 +201,12 @@ Arithmetik, nicht das Verhalten von `gui_main`. Defect A/B brauchen T3/T4 + Log.
       gemessen, danach wird noch ein Schritt gefahren, erst dann bricht die
       Schleife ab → `entry_current` steht nach jedem Scan auf `End + Step`.
       Konsistent, erzeugt also keinen Gruppenversatz, aber eine
-      Buchhaltungs-Ungenauigkeit.
+      Buchhaltungs-Ungenauigkeit. **Beobachtung 2026-08-04:** dieser Overrun
+      hat eine P0-SIM-Messung (Defect-C-Repro in `sim_defect_probe.py`)
+      verunreinigt — die Messung lief einen Schritt hinter dem beabsichtigten
+      Scan-Ende, s. `CONTEXT.md` P0. Ändert nichts an "bewusst erhalten, nur
+      mit Rücksprache" — nur ein Präzedenzfall dafür, dass sich der Bug auch
+      außerhalb reiner Buchhaltung bemerkbar machen kann.
 - [ ] **CSV-Export enthält nur `index, wavelength_nm, voltage_V`** — kein
       `pos_steps`, kein `last_move_direction`. Das Encoder-Residuum ist aus der
       GUI-CSV nicht rekonstruierbar. Nachrüsten hieße `PlotManager`-

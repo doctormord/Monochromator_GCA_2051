@@ -45,6 +45,20 @@ state = {
     "ser": None,               # pyserial handle or None
     "connected": False,
     "is_scanning": False,
+    # True for the duration of a single GoTo (goto_wavelength_action /
+    # goto_worker), including its auto-recover retry after a Stop. Mirrors
+    # is_scanning's role: stop_action()'s _stop_worker waits on
+    # (is_scanning OR is_moving) before calling recover_after_stop(), so a
+    # Stop pressed during a GoTo no longer re-arms the drive (clearing
+    # stop_flag) while goto_worker's own wait_until_position() poll is still
+    # running -- that race meant stop_flag could be cleared before
+    # goto_worker's poll ever saw it True, so the GoTo just sat there until
+    # its full move timeout (up to MAX_MOVE_TIMEOUT = 900 s) elapsed instead
+    # of aborting promptly. Confirmed via a live thread-stack dump in SIM
+    # (sim_defect_probe.py): goto_worker was still parked inside
+    # wait_until_position() 18+ s after Stop was pressed and "recovered"
+    # had already been logged.
+    "is_moving": False,
     "is_paused": False,
     "stop_flag": False,
     "current_nm": 500.0,       # tracked by the user; the device reports no nm

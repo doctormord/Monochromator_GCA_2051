@@ -3,7 +3,9 @@
 > Lebendes Dokument. Überschreiben, nicht anhäufen. Prosa DE, Code/Bezeichner EN.
 > Stand: 2026-08-04. Konsolidiert aus allen HANDOVER/BACKLOG/HANDOFF-Ständen bis
 > HANDOFF_2026-07-23b + Offset-Diagnose-Session 2026-07-29/31 + Diagnose-Patch
-> angewendet 2026-08-04.
+> angewendet 2026-08-04 + SIM-Diagnose- und Fix-Session 2026-08-04 (Defect A/B
+> behoben, Defect C entschärft, Stop/GoTo-Race gefunden und behoben — alles
+> NUR SIM-verifiziert, s. „AKTUELL" unten).
 
 ## Rollenverteilung der Dokumente
 
@@ -77,7 +79,12 @@ im Projekt, ist aber NICHT Teil des ausgelieferten Pakets (historische Referenz)
 `read_faulhaber_config.py` (Controller-Zustand read-only, `--watch` für
 Live-Endschalter), `idle_poll_test.py` (Serial-Link vs. bewegungskorreliert),
 `step_resolution_test.py` (feinste nutzbare Schrittweite + Ankunftstoleranz),
-`probe_move_timing.py` (reale Move-/Pollrate), `tune_ramp.py` (AC/DEC/SP).
+`probe_move_timing.py` (reale Move-/Pollrate), `tune_ramp.py` (AC/DEC/SP),
+`offset_probe.py` (P0-Offset-Erhebung, reimplementiert die Move-/Scan-Logik
+transparent aus denselben Primitiven statt `gui_main` zu fahren), `sim_defect_probe.py`
+(neu 2026-08-04; fährt `gui_main`/`scan_engine` DIREKT und headless gegen
+`sim_hardware`, kein App-Import-Verzicht wie bei `offset_probe.py` — Details
+in `CONTEXT.md` P0).
 
 **Dokumente:** `MANUAL.md` (vollständiges Handbuch, Single Source; README und
 PDF werden daraus erzeugt), `README.md`, `CLAUDE.md`, `HANDOVER.md`,
@@ -144,34 +151,73 @@ der Encoder das Ziel erreicht. Diese Frage braucht einen **optischen** Test.
 
 **`LR` ist relativ zum letzten kommandierten Sollwert, nicht zur Istposition**
 (laut Antriebshandbuch). Nach einem harten Stop können der interne Sollwert des
-Antriebs und `POS` auseinanderlaufen. Relevant für den Fix von Defect B — ein
-aus `POS` berechnetes `LR` ist nach einem Stop nicht automatisch richtig.
+Antriebs und `POS` auseinanderlaufen. Relevant für Defect B — dessen
+Buchhaltungsseite ist behoben (s. „AKTUELL" unten), aber ob ein aus `POS`
+berechnetes `LR` nach einem harten Stop auf ECHTER Hardware wirklich richtig
+ist, bildet `sim_hardware` nicht nach. Bleibt eine offene Rig-Frage.
+
+## SIM-bestätigter Stand, Rig-Verifikation offen (2026-08-04)
+
+Zur Abgrenzung von „Rig-bestätigter Stand" oben: alles hier ist **nur** unter
+`QT_QPA_PLATFORM=offscreen` gegen `sim_hardware.FakeFaulhaber` verifiziert
+(`sim_defect_probe.py`), nicht am Gerät. SIM beweist Codepfade und
+Bookkeeping-Arithmetik, nicht reales Motor-/Serial-Timing oder die
+`LR`-Sollwert-Feinheit nach einem harten Stop (s. oben).
+
+- **Defect A behoben:** `scan_worker` re-ankert `current_nm`/`entry_current`
+  jetzt sowohl beim Abbruch (`break` nach fehlgeschlagenem
+  `wait_until_position()`) als auch am normalen Scan-Ende gegen die reale
+  Encoder-Position — analog zu `free_run_worker`s bestehender Rückführung.
+  Dieselbe Lücke in `do_resume()` ebenfalls geschlossen.
+- **Defect B behoben:** `goto_worker` berechnet die Wellenlänge nach einem
+  Stop jetzt aus der frisch gelesenen Encoderposition (über ein am
+  Worker-Start erfasstes Anker-Paar), nicht mehr aus dem nie aktualisierten
+  `entry_current`-Feld.
+- **Vierter Fund, behoben:** Stop während eines GoTo re-armte die Drive
+  (`recover_after_stop()`, löscht `stop_flag`) oft BEVOR `goto_worker`s
+  eigene Warteschleife den Stop überhaupt bemerkte — weil `stop_action()`
+  bisher nur auf `state['is_scanning']` wartete, was ein GoTo nie setzt.
+  Der GoTo lief dann im Hintergrund bis zu seinem vollen Move-Timeout weiter
+  (bis zu 900 s), während die Konsole bereits „Recovered" meldete. Neues
+  `state['is_moving']`-Flag schließt die Lücke; ein zugehöriger `fsm`-Bug
+  (zeigte „IDLE" während eines laufenden Auto-Recover-Retries) ebenfalls
+  behoben.
+- **Defect C nur teilweise entschärft, kein Fix.** Re-Anchor gegen die
+  kompensations-bereinigte Encoder-Position nach GoTo/Scan-Ende ergänzt
+  (Muster wie `free_run_worker`), bewusst NICHT `comp` blind ins Label
+  addiert. Für exakt erreichte Moves ist das mathematisch ein No-Op — kann
+  eine `slip_nm`-Fehlkalibrierung strukturell nicht beseitigen. Der
+  eigentliche nächste Schritt ist eine Rig-Kalibrierprüfung
+  (`backlash_cal.py`), kein weiterer Code. Details/Herleitung in `CONTEXT.md`.
 
 ## AKTUELL: Wellenlängen-Offset ~0.07 nm zwischen Scan-Gruppen
 
-Untersuchung läuft, **noch kein Fix committet.** Details, Hypothesen und
-Testprotokoll in `CONTEXT.md`; Defect-Checkliste in `BACKLOG.md` (P0).
+Diagnose abgeschlossen, drei Defekte plus ein vierter Fund SIM-verifiziert
+gefixt (s. Abschnitt oben) — **Rig-Session steht noch aus.** Details,
+Hypothesen und Testprotokoll in `CONTEXT.md`; Checkliste in `BACKLOG.md` (P0).
 
-Kurzfassung: Scans derselben Linie sind innerhalb einer Gruppe deckungsgleich,
-zwischen Gruppen starr um ~0.07 nm verschoben (Slip = 0.080 nm). Avg-Fenster,
-Thermodrift, Backlash-Streuung, RC-Zeitkonstanten und mechanische Relaxation
-sind ausgeschlossen. Drei Defekte in `scan_engine.py` identifiziert (A: fehlende
-Re-Verankerung nach Scan-Abbruch; B: Go To fährt nach Stop mit stalem Ursprung
-weiter; C: Backlash-Kompensation geht ins Positionsziel, nicht ins Label).
-C ist der wahrscheinlichste Verursacher.
+Kurzfassung des Ausgangsbefunds: Scans derselben Linie sind innerhalb einer
+Gruppe deckungsgleich, zwischen Gruppen starr um ~0.07 nm verschoben (Slip ≈
+0.09 nm laut Settings). Avg-Fenster, Thermodrift, Backlash-Streuung,
+RC-Zeitkonstanten und mechanische Relaxation sind ausgeschlossen.
 
-Diagnose-Patch `stage1_diag.patch` ist **angewendet** (in `scan_engine.py`
-verifiziert: 3 Hunks, additiv, `try/except: pass`, `read_position()`-Calls
-10→10 — die Position wird nur früher gelesen und wiederverwendet, nicht
-doppelt abgefragt — `patch --dry-run` bestätigt sauberen, vollständig
-applizierten Stand). Ausstehend: eine Session mit reproduziertem Offset
-mitschneiden und auswerten. Erst Messdaten, dann Fix — insbesondere darf
-Defect A nicht vor der Datenerhebung gefixt werden, sonst ist Hypothese H2
-nicht mehr testbar.
+Diagnose-Patch `stage1_diag.patch` ist weiterhin **angewendet** (in
+`scan_engine.py` verifiziert: 3 Hunks, additiv, `try/except: pass`,
+`read_position()`-Calls 10→10 — die Position wird nur früher gelesen und
+wiederverwendet, nicht doppelt abgefragt — `patch --dry-run` bestätigt
+sauberen, vollständig applizierten Stand) und bleibt für die Rig-Session
+nützlich.
 
 ## Nächster sinnvoller Schritt
 
-Eine Session mit reproduziertem Offset mitschneiden (Diagnose-Patch ist
-bereits angewendet), `[DIAG]`-Zeilen gegen die Entscheidungstabelle in
-`CONTEXT.md` auswerten. Danach die Fixes A/B/C schreiben — für den Defekt,
+Rig-Session: T3/T4 aus `CONTEXT.md` fahren (sollten nach dem A/B/Race-Fix
+keinen bleibenden Offset mehr zeigen bzw. sofort statt erst nach vollem
+Timeout abbrechen), `slip_nm` gegen den echten Backlash verifizieren
+(`backlash_cal.py` — das ist der Schritt, der Defect C tatsächlich schließt,
+kein weiterer Code), dann TESTPLAN.md Section 3c (10 gequeute Scans) als
+Abschlussbestätigung. Falls T3/T4 am Rig doch noch einen Offset zeigen: der
+SIM-Fix war unvollständig, zurück zu `CONTEXT.md`. Alt (weiterhin gültig als
+Referenz für die Auswertung, falls die Rig-Session neue `[DIAG]`-Daten
+braucht): `[DIAG]`-Zeilen gegen die Entscheidungstabelle in `CONTEXT.md`
+auswerten. Danach ggf. weitere Fixes schreiben — für den Defekt,
 den die Daten tatsächlich belasten.
