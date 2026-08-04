@@ -303,14 +303,26 @@ am Rig zur Bestätigung.
 
 ## Doku-Korrekturen (gefunden, noch nicht eingepflegt)
 
-- [ ] **`MANUAL.md`, Known limits, ist an einer Stelle veraltet:** dort steht,
-      `POS_TOL_STEPS` sei „a fixed 0.01 nm, which equals a whole step at
-      0.01 nm". Tatsächlich ist der Wert **90 Schritte ≈ 0.25 pm**, laut
-      Kommentar in `device_constants.py` 40× feiner als ein 0.01-nm-Schritt.
-      Der Manual-Absatz beschreibt einen früheren Wert. Beim nächsten
-      MANUAL-Update korrigieren (README und PDF werden daraus erzeugt).
-- [ ] Ältere HANDOVER-Stände führen `gui_main_tk.py` als Modul 12; die Datei
-      liegt nicht mehr im Repo. In `HANDOVER.md` bereits korrigiert.
+- [x] **`MANUAL.md`, Known limits, `POS_TOL_STEPS`** — beim Gegenlesen
+      2026-08-04 stellte sich heraus, dass dieser Eintrag selbst veraltet war:
+      MANUAL.md beschreibt den Wert längst korrekt („tightened from 3617 steps
+      … to **90 steps**"). Nichts zu tun, Punkt geschlossen.
+- [x] **`gui_main_tk.py`** — der bisherige Eintrag (und die entsprechende
+      Stelle in `HANDOVER.md`) behaupteten, die Datei liege nicht mehr im
+      Repo. Das war **falsch**, sie liegt weiterhin dort (~25 kB). In
+      `HANDOVER.md` korrigiert; Status: historische Referenz wie der
+      ex-Monolith, von nichts importiert, bewusst nicht gelöscht.
+- [x] **Begriffe „Slip" und „Backlash" vereinheitlicht (2026-08-04).** Beide
+      bezeichneten dieselbe Größe — das mechanische Spiel. Die GUI zeigte
+      beides gleichzeitig (Feld „Slip / Backlash (nm)", ein Status-Label
+      „Slip: …", ein zweites „Backlash: …"), was wie zwei verschiedene Werte
+      aussah. Alle nutzersichtbaren Strings sagen jetzt **Backlash**; ebenso
+      MANUAL.md inkl. neuem Terminologie-Kasten. Bewusst NICHT umbenannt:
+      interne Bezeichner (`slip_nm_var`, `_get_slip_nm`, Settings-Key
+      `backlash_slip_nm`) und das `[SLIP]`-Log-Tag — letzteres ist
+      dokumentiertes Grep-Ziel (MANUAL.md, T5 in `CONTEXT.md`) und steht in
+      bereits aufgezeichneten Rig-Logs; ein Rename würde vorhandene
+      Anleitungen und Mitschnitte entwerten.
 
 ## Erledigt
 

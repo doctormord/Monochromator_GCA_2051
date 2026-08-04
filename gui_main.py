@@ -1402,13 +1402,30 @@ _panel_lay.addWidget(_sec_queue)
 # first goto/scan) -> known direction; from then on every direction reversal gets
 # the nm value below added. The nm VALUE persists (settings JSON); the direction
 # state does NOT -> Reference Run every session.
-_sec_bl = CollapsibleSection("BACKLASH / SLIP")
+#
+# TERMINOLOGY: "backlash" and "slip" were used interchangeably for the SAME
+# quantity -- the mechanical play in the drive train. The GUI showed both
+# ("Slip / Backlash (nm)" as the field, "Slip: ..." in one status label,
+# "Backlash: ..." in another), which read as two different values. All
+# user-facing text now says BACKLASH, the precise engineering term and the one
+# device_constants.SIM_BACKLASH_NM already used.
+# Deliberately NOT renamed: the internal identifiers (slip_nm_var,
+# _get_slip_nm, backlash_slip_nm in the settings file) and the [SLIP] log tag.
+# The identifiers would be a wide, behaviour-neutral rename for no user
+# benefit; the log tag is referenced as a grep target by MANUAL.md, by the T5
+# test in CONTEXT.md and by rig logs already recorded, so renaming it would
+# invalidate existing instructions and captures.
+# The real distinction worth knowing is NOT slip-vs-backlash but: the value in
+# this field is the CONFIGURED estimate, while the instrument has a TRUE
+# mechanical play. Their difference is the calibration error -- measurable, and
+# exactly what backlash_cal.py (the "Calibrate…" button) exists to reduce.
+_sec_bl = CollapsibleSection("BACKLASH")
 entry_slip = _line_edit(str(_saved_settings.get("backlash_slip_nm", 0.30)))
 btn_reference_run = _btn("Reference Run")
 btn_calibrate = _btn("Calibrate…", "Primary")
 lbl_direction_state = QtWidgets.QLabel("Direction: unknown – run Reference Run first")
 lbl_direction_state.setStyleSheet(f"color:{C_MUTED};")
-_sec_bl.add_row("Slip / Backlash (nm)", entry_slip)
+_sec_bl.add_row("Backlash (nm)", entry_slip)
 _sec_bl.add_widget(btn_reference_run)
 _sec_bl.add_widget(btn_calibrate)
 _sec_bl.add_widget(lbl_direction_state)
@@ -1452,7 +1469,7 @@ _panel_lay.addStretch(1)
 _status = _window.statusBar()
 _lbl_fsm = QtWidgets.QLabel("State: IDLE")
 _lbl_conn = QtWidgets.QLabel("Status: disconnected")
-_lbl_slip = QtWidgets.QLabel("Slip: —")
+_lbl_slip = QtWidgets.QLabel("Backlash: —")
 # Drive housing temperature (TEM). Refreshed slowly and ONLY while idle -- see
 # _refresh_temperature(). Tooltip spells out what the number is, because
 # "housing" is not "winding": the drive derives coil/MOSFET temperature from
@@ -1621,7 +1638,7 @@ _btn_ai_reset.setToolTip("Reset the max-hold value")
 # above 9.9999 V, which is exactly the jitter this is meant to prevent.
 _apply_tabular_numbers(_lbl_ai,     "AI (SIM): -88.8888 V", 6)
 _apply_tabular_numbers(_lbl_ai_max, "max -88.8888 V", 4)
-_apply_tabular_numbers(_lbl_slip,   "Slip: 8.888 nm", 4)
+_apply_tabular_numbers(_lbl_slip,   "Backlash: 8.888 nm", 4)
 _apply_tabular_numbers(_lbl_temp,   "Temp: 888 °C", 4)
 
 _ai_group = QtWidgets.QWidget()
@@ -1883,8 +1900,8 @@ def _on_slip_edited():
     try:
         val = max(0.0, float(a_slip.get()))
         app_config.save(backlash_slip_nm=val)
-        log(f"[SETTINGS] Slip saved: {val:.3f} nm")
-        _invoker.post(lambda: _lbl_slip.setText(f"Slip: {val:.3f} nm"))
+        log(f"[SETTINGS] Backlash saved: {val:.3f} nm")
+        _invoker.post(lambda: _lbl_slip.setText(f"Backlash: {val:.3f} nm"))
     except Exception:
         pass  # invalid entry (e.g. mid-typing) -> do not save
 
@@ -2039,7 +2056,7 @@ register_hook("ui_after", lambda fn: _invoker.post(fn))
 a_btn_reference_run = _ButtonAdapter(btn_reference_run)
 
 # =====================================================================
-# SLIP / BACKLASH CALIBRATION DIALOG (PS-2600A style)
+# BACKLASH CALIBRATION DIALOG (PS-2600A style)
 # =====================================================================
 class CalibrationDialog(QtWidgets.QDialog):
     """Separate window for backlash calibration via a reference line.
@@ -2051,7 +2068,7 @@ class CalibrationDialog(QtWidgets.QDialog):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setWindowTitle("Slip / Backlash — Calibration")
+        self.setWindowTitle("Backlash — Calibration")
         self.setModal(False)
         self.resize(680, 560)
         # Apply the app theme EXPLICITLY to this dialog. app.setStyleSheet()
@@ -2214,7 +2231,7 @@ class CalibrationDialog(QtWidgets.QDialog):
         try:
             app_config.save(backlash_slip_nm=val)
             log(f"[CAL] Applied backlash {val:.3f} nm and saved.")
-            _invoker.post(lambda: _lbl_slip.setText(f"Slip: {val:.3f} nm"))
+            _invoker.post(lambda: _lbl_slip.setText(f"Backlash: {val:.3f} nm"))
         except Exception as e:
             log(f"[CAL] Save failed: {e}", "warn")
         self.close()
@@ -2537,7 +2554,7 @@ _temp_timer.start(15000)
 set_buttons_connected(False)
 set_fsm("IDLE")
 try:
-    _lbl_slip.setText(f"Slip: {float(a_slip.get()):.3f} nm")
+    _lbl_slip.setText(f"Backlash: {float(a_slip.get()):.3f} nm")
 except Exception:
     pass
 if _restored_nm is not None:

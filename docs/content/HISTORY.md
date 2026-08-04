@@ -873,3 +873,53 @@ Rig (`backlash_cal.py`) zu verkleinern, nicht über weiteren Code.
 
 Regression: `verify_abcd.py` weiterhin 4× PASS, `sim_defect_probe.py` sauber.
 Unverändert gilt: alles SIM-verifiziert, keine Rig-Session.
+
+## 2026-08-04
+
+Begriffe „Slip"/„Backlash" vereinheitlicht, zwei falsche Doku-Aussagen
+korrigiert, Doku zum Sessionabschluss glattgezogen.
+
+**Auslöser:** Nachfrage des Nutzers, was im Projekt eigentlich der
+Unterschied zwischen „Slip" und „Backlash" sei. Antwort nach Durchsicht des
+Codes: **keiner** — beide bezeichnen dieselbe Größe, das mechanische Spiel im
+Antriebsstrang. Die Namensspaltung verlief nicht entlang der Bedeutung,
+sondern entlang der Module (App-/Kompensationsseite sagte „slip", Simulator-/
+Physikseite „backlash"). Am sichtbarsten war das in der GUI, die beides
+gleichzeitig zeigte: Feld „Slip / Backlash (nm)", ein Status-Label „Slip: …",
+ein zweites „Backlash: …" — für dieselbe Zahl.
+
+Bei der Gelegenheit auch die eigene Wortwahl der Vorsession korrigiert:
+„slip_konfiguriert − backlash_real" liest sich wie zwei Größen, gemeint war
+*ein* Wert einmal geschätzt und einmal echt. Präziser: **Kalibrierabweichung**.
+
+**Umgesetzt:** alle nutzersichtbaren Strings in `gui_main.py` auf
+**Backlash** vereinheitlicht (Sektion, Feld, beide Status-Label,
+Dialog-Titel, Settings-Log). MANUAL.md ebenso, inklusive neuem
+Terminologie-Kasten, der die eigentlich relevante Unterscheidung benennt:
+konfigurierter Schätzwert im Feld vs. wahres mechanisches Spiel des Geräts,
+Differenz = Kalibrierfehler, den `backlash_cal.py` beseitigt.
+Bewusst NICHT umbenannt und im Code begründet: interne Bezeichner
+(`slip_nm_var`, `_get_slip_nm`, Settings-Key `backlash_slip_nm`) sowie das
+`[SLIP]`-Log-Tag — letzteres ist dokumentiertes Grep-Ziel (MANUAL.md, T5 in
+CONTEXT.md) und steht in bereits aufgezeichneten Rig-Logs; ein Rename würde
+vorhandene Anleitungen und Mitschnitte entwerten.
+
+**Zwei falsche Doku-Aussagen beim Gegenlesen gefunden und korrigiert:**
+- HANDOVER.md und BACKLOG.md behaupteten, `gui_main_tk.py` liege nicht mehr
+  im Repo. Falsch — die Datei liegt weiterhin dort (~25 kB). Status jetzt
+  korrekt beschrieben: historische Referenz wie der ex-Monolith, von nichts
+  importiert, bewusst nicht gelöscht.
+- Der BACKLOG-Punkt „MANUAL.md bei `POS_TOL_STEPS` veraltet" war selbst
+  veraltet: MANUAL.md beschreibt den Wert längst korrekt (90 Schritte).
+  Punkt geschlossen, ohne Änderung an MANUAL.md.
+
+Verifikation: `py_compile` über alle geänderten Module, SIM-Smoke-Test
+(Connect → Reference Run → Scan → sauberes Ende), `sim_defect_probe.py`
+(Section 3 −0.00874 nm = Kalibrierabweichung, Section 4 ±0.00000 nm) und
+`verify_abcd.py` 4× PASS — alle nach der Stringänderung erneut gelaufen.
+
+Damit ist der Arbeitsstand abgeschlossen und gepusht. **Nächster Schritt
+bleibt die Rig-Session** (T3/T4 aus CONTEXT.md, `slip_nm`-Kalibrierung via
+`backlash_cal.py`, danach TESTPLAN.md Section 3c). Besonders Fix B (Stop
+fährt nicht mehr nach) ändert echtes Antriebsverhalten und ist bisher
+ausschließlich in SIM belegt.

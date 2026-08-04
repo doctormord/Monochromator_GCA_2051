@@ -3,9 +3,11 @@
 > Lebendes Dokument. Überschreiben, nicht anhäufen. Prosa DE, Code/Bezeichner EN.
 > Stand: 2026-08-04. Konsolidiert aus allen HANDOVER/BACKLOG/HANDOFF-Ständen bis
 > HANDOFF_2026-07-23b + Offset-Diagnose-Session 2026-07-29/31 + Diagnose-Patch
-> angewendet 2026-08-04 + SIM-Diagnose- und Fix-Session 2026-08-04 (Defect A/B
-> behoben, Defect C entschärft, Stop/GoTo-Race gefunden und behoben — alles
-> NUR SIM-verifiziert, s. „AKTUELL" unten).
+> angewendet 2026-08-04 + SIM-Diagnose-/Fix-Session 2026-08-04 (Defect A/B
+> behoben, Defect C entschärft, Stop/GoTo-Race, vier Folgefehler aus dem
+> Selbst-Review, Slack-first-Modell, Begriffsvereinheitlichung
+> Slip → Backlash). **Alles NUR SIM-verifiziert, keine Rig-Session** —
+> s. „AKTUELL" unten. Chronologie aller Sessions: `HISTORY.md`.
 
 ## Rollenverteilung der Dokumente
 
@@ -95,8 +97,13 @@ PDF werden daraus erzeugt), `README.md`, `CLAUDE.md`, `HANDOVER.md`,
 GUI-Aktionen über `ui_hook` aus, `scan_engine` bedient konkrete Widgets über
 `refs[...]`. Kein Logik-Modul kennt Qt/Tkinter direkt.
 
-**Korrektur gegenüber älteren HANDOVER-Ständen:** `gui_main_tk.py` (alte
-Tkinter-GUI) liegt nicht mehr im Repo. Die Modulliste zählte sie noch mit.
+**Korrektur (2026-08-04):** ein früherer HANDOVER-Stand behauptete,
+`gui_main_tk.py` (alte Tkinter-GUI) liege nicht mehr im Repo. Das ist
+**falsch** — die Datei liegt weiterhin im Projekt (~25 kB, Stand 2026-07-24).
+Sie wird von nichts importiert und ist durch `gui_main.py` (Qt6) vollständig
+abgelöst, hat aber denselben Status wie der ex-Monolith: historische Referenz,
+nicht Teil des ausgelieferten Pakets. Nicht gelöscht (Doku-Policy: Altlasten
+markieren statt stillschweigend entfernen).
 
 ## Rig-bestätigter Stand (nicht mehr offen)
 

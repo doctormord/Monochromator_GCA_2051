@@ -12,7 +12,7 @@ NI-DAQ analog input reading the PMT.
 2. [The window at a glance](#2-the-window-at-a-glance)
 3. [Connecting](#3-connecting)
 4. [Knowing where you are: Reference Run and Calibration](#4-knowing-where-you-are-reference-run-and-calibration)
-5. [Backlash / slip compensation](#5-backlash--slip-compensation)
+5. [Backlash compensation](#5-backlash-compensation)
 6. [Moving: Go To, Jog, Mark Point](#6-moving-go-to-jog-mark-point)
 7. [Scanning](#7-scanning)
 8. [Averaging: Timebase, Pre-settle, Avg mode](#8-averaging-timebase-pre-settle-avg-mode)
@@ -85,12 +85,12 @@ over the plot), and the red **STOP** button.
 | SCAN | Start/End/Step, Timebase, Pre-settle, Start Scan, Free Run, Pause/Resume/Stop |
 | AVERAGING | Avg mode, Avg samples, Avg fraction, live explanation |
 | SCAN QUEUE | Queued scans, Add/Update/Remove/Clear, Run queue |
-| BACKLASH / SLIP | Slip value, Reference Run, calibration dialog |
+| BACKLASH | Backlash value, Reference Run, calibration dialog |
 | CALIBRATION | Known λ here → re-anchor |
 | DAQ | Device and analog input channel |
 | EXPORT | Autosave, folder, filename pattern, Save CSV now |
 
-**Footer (status bar)** — State · connection · Slip · drive Temp · live AI
+**Footer (status bar)** — State · connection · Backlash · drive Temp · live AI
 value with bar graph, max-hold and *Reset max*.
 
 ---
@@ -120,7 +120,7 @@ hardware attached (§18).
 
 These two are different things and are often confused.
 
-### Reference Run (BACKLASH / SLIP section)
+### Reference Run (BACKLASH section)
 
 Moves a fixed distance in one direction to **seat the mechanical backlash**.
 It does *not* tell the software where it is — it establishes *which
@@ -158,7 +158,19 @@ Both a comma and a dot work as the decimal separator here.
 
 ---
 
-## 5. Backlash / slip compensation
+## 5. Backlash compensation
+
+> **Terminology.** Earlier versions of this manual and of the GUI used
+> *slip* and *backlash* interchangeably for the same thing — the mechanical
+> play in the drive train. Everything user-facing now says **backlash**.
+> Two internal names still say "slip" on purpose: the settings key
+> `backlash_slip_nm` and the `[SLIP]` log tag, the latter because it is a
+> documented grep target and appears in rig logs already recorded.
+>
+> The distinction that *does* matter: the value in the Backlash field is the
+> **configured estimate**; the instrument has a **true** mechanical play.
+> The difference between them is a calibration error that shifts every
+> reversal — which is what the calibration dialog below exists to remove.
 
 Gear trains have slack. When the direction of travel reverses, the motor
 turns for a while before the grating starts to follow. The software
@@ -174,7 +186,7 @@ sweep still lands on its nominal end point.
 
 ### Measuring the value: the calibration dialog
 
-*BACKLASH / SLIP → the calibration dialog*
+*BACKLASH → the calibration dialog*
 
 With a reference lamp on, the line is crossed **once upward and once
 downward**. The offset between the two measured peaks is the backlash.
@@ -187,7 +199,7 @@ downward**. The offset between the two measured peaks is the backlash.
 | Dwell (s) | Per-point time (uses the current averaging settings) |
 
 Press **Calibrate**, watch both traces appear, then **Apply & Save** to write
-the measured value into the Slip field and persist it.
+the measured value into the Backlash field and persist it.
 
 Peak position is taken as the **intensity-weighted centroid** of all points
 above 30 % of the peak height — sub-step accurate and far less noise
@@ -496,7 +508,7 @@ defaults rather than crashing.
 
 | Key | Meaning |
 |---|---|
-| `backlash_slip_nm` | Measured backlash |
+| `backlash_slip_nm` | Measured backlash (key name kept for compatibility with existing settings files) |
 | `last_current_nm` | Last known wavelength (software estimate, **not** a readback) |
 | `port`, `baud` | Connection |
 | `scan_start_nm`, `scan_end_nm`, `scan_step_nm`, `scan_wait_ms` | Scan fields |
