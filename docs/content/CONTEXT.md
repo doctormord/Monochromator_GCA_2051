@@ -126,6 +126,21 @@ zeigte `fsm` fälschlich „IDLE", während der Retry-Move noch lief. Auch behob
 (`set_fsm("MOVING")` direkt nach dem `recover_after_stop()`-Aufruf im
 Interrupted-Zweig).
 
+**Nachtrag — vier Folgefehler aus dem Selbst-Review (behoben, SIM-verifiziert).**
+(A) `read_position()` gibt bei Timeout/Garbage still `0` zurück und wirft nie
+(`protocol_faulhaber.py`) — die neuen Re-Anchor-Stellen schrieben diesen Wert
+in `state['current_nm']`, also in den Ursprung jeder Folge-Delta-Rechnung; im
+SIM-Gegentest hätte das alte Verhalten 4.0 nm danebengelegen, mit der
+Sessiondauer wachsend (POS läuft frei). Jetzt zentral über
+`_encoder_nm_or_none()` abgesichert. (B) Der Auto-Recover-Retry in
+`goto_worker` unterschied Nutzer-Stop nicht von Timeout/Fault und fuhr nach
+einem Stop trotzdem ans Originalziel — belegt im SIM-Log der Vorsession
+(`[DONE] Reached 531.000 nm (after auto-recover)`), damals als Erfolg
+fehlgelesen. (C) `reference_run_action` setzte kein Busy-Flag → Stop während
+einer Referenzfahrt lief weiter in die alte Race. (D) Go To hatte keinen
+Reentrancy-Guard → zwei parallele Worker möglich, `is_moving` dadurch
+unzuverlässig. Alle vier behoben; Details in `BACKLOG.md` P0.
+
 **Defect C — Kompensation im Ziel, nicht im Label. TEILWEISE ENTSCHÄRFT, KEIN
 vollständiger Fix.** `comp = reversal_compensation_steps(direction)` geht in
 `grid_slack_steps` → `target_abs`, aber **nicht** in `pos_nm` (Plot-/CSV-Label).

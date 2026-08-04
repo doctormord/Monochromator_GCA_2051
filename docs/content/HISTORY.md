@@ -755,3 +755,73 @@ mehr real getrennte Arbeitssessions ergab als die im Repo vorhandenen
 selbst gelesen (keine Delegation nötig). Rohtext von den Subagenten nicht
 unverändert übernommen, sondern selbst zu den finalen Einträgen verdichtet
 und in den bestehenden Dokumentationsstil überführt.
+
+## 2026-08-04
+
+Selbst-Review der P0-Fixes und vier daraus resultierende Folge-Fixes.
+
+Nutzer bat um eine Liste der selbst als riskant eingeschätzten Stellen der
+vorherigen Sessions und ließ diese anschließend einzeln durchprüfen. Beim
+Nachlesen des eigenen Codes kamen zwei Befunde heraus, die schwerer wogen
+als alles ursprünglich Geflaggte:
+
+- **A — `read_position()` liefert bei Lesefehler still `0` und wirft nie.**
+  Die fünf in der Vorsession neu eingebauten Re-Anchor-Stellen (GoTo-Erfolg,
+  GoTo-Retry-Erfolg, abgebrochener Scan-Schritt, normales Scan-Ende,
+  abgebrochener Resume-Schritt) schrieben diesen erfundenen Wert ungeprüft in
+  `state['current_nm']`/`entry_current` — den Ursprung, aus dem jeder
+  Folge-Move sein Delta rechnet und den `app_config` als `last_current_nm`
+  persistiert. Die umgebenden `try/except` waren wirkungslos, weil keine
+  Exception fliegt. Der Docstring von `read_position_or_none()` beschreibt
+  genau diese Falle für Aufrufer, die den Rohwert direkt verwenden — die
+  Vorsession hatte sie trotzdem gebaut. Gegentest in SIM (POS-Antworten
+  gezielt unterdrückt): das alte Verhalten hätte 4.0 nm danebengelegen,
+  mit wachsender Sessiondauer beliebig mehr, da `POS` frei läuft.
+- **B — Ein Stop während eines Go To stoppte nicht.** Der
+  Auto-Recover-Retry in `goto_worker` konnte „Nutzer-Stop" nicht von
+  „Timeout/Fault" unterscheiden und fuhr nach dem Abbruch trotzdem ans
+  Originalziel. Der Beweis stand bereits wörtlich im SIM-Log der Vorsession
+  (`[DONE] Reached 531.000 nm (after auto-recover)` nach einem Stop bei
+  einem Drittel der Strecke, Encoder bestätigte die volle Fahrt) — beim
+  ersten Lesen war das als „Fix funktioniert" fehlinterpretiert worden. Der
+  `is_moving`-Fix derselben Vorsession hatte das Problem sogar verschärft,
+  weil `stop_action()` seither bis zu 10 s wartet und dem Retry damit mehr
+  Zeit zum Durchlaufen gibt.
+- **C — Die Referenzfahrt setzte gar kein Busy-Flag**, lief also weiterhin in
+  die ursprüngliche Stop-Race, die für Go To bereits geschlossen war.
+- **D — Go To hatte keinen Reentrancy-Schutz**: geprüft wurde nur
+  `is_scanning`, sodass ein Doppelklick auf Go To oder Jog (ein Jog IST ein
+  Go To) zwei `goto_worker` startete und `is_moving` unzuverlässig machte —
+  der zuerst fertige Worker löschte das Flag, während der andere noch fuhr.
+
+Alle vier auf Nutzerwunsch behoben: neuer Helper `_encoder_nm_or_none()`
+(zentralisiert alle fünf Re-Anchor-Umrechnungen über
+`read_position_or_none()`, behält bei `None` die bisherige Schätzung und
+warnt); `stop_flag` wird in `goto_worker` **vor** `recover_after_stop()`
+ausgewertet und bei Nutzer-Stop nur noch re-verankert statt nachgefahren;
+`reference_run_action` setzt/löscht `is_moving`; Reentrancy-Guard für Go To,
+wobei `is_moving` jetzt auf dem GUI-Thread vor dem Thread-Start gesetzt wird
+(schließt zusätzlich das Fenster einer Thread-Start-Latenz, in dem ein Stop
+das Flag noch nicht sehen konnte). Zusätzlich `do_resume` gehärtet: dessen
+Anker `curr_abs` kam ebenfalls aus `read_position()` — bei Lesefehler wird
+der Schritt jetzt abgebrochen, statt aus einer erfundenen Position heraus
+ein Relativ-Kommando zu senden.
+
+Verifikation: gezieltes Skript `verify_abcd.py` (Scratchpad, nicht im Repo)
+mit je einem Szenario pro Fix, alle vier PASS — inklusive eines
+Gegenrechnungs-Nachweises für A (was das alte Verhalten geschrieben hätte).
+Ein erster Lauf meldete A fälschlich als FAIL: die Assertion erwartete, dass
+das Label beim neuen Ziel landet, obwohl ohne lesbares POS gar keine Ankunft
+bestätigt werden kann — die Assertion war falsch, nicht der Fix.
+Anschließend `sim_defect_probe.py` als Regressionslauf: Defect A und B
+weiterhin bei `label - encoder_truth = +0.00000`, und der Stop-Test zeigt
+jetzt zusätzlich `Goto aborted by operator -- not retrying` mit Halt bei
+594.478 nm statt Durchfahrt auf 599.75 nm.
+
+Bewusst NICHT gefixt (im Backlog vermerkt): die Log-Schwelle `1e-4` nm in den
+Erfolgs-Re-Anchors liegt unter der legitimen Ankunftstoleranz
+(`POS_TOL_STEPS` = 90 Schritte ≈ 2.5e-4 nm), die Meldung feuert daher
+routinemäßig statt nur bei echter Slip-Fehlkalibrierung; und der
+Teilweg-Re-Anchor schätzt den Slack-Anteil weiterhin mit 0, obwohl „Spiel
+wird zuerst aufgenommen" eine strikt bessere Schranke erlauben würde.
+Weiterhin gilt: alles nur SIM-verifiziert, keine Rig-Session.

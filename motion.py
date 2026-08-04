@@ -597,6 +597,13 @@ def reference_run_action(on_done=None):
         ui_hook('show_warning', "Busy", "Cannot run reference move while scanning.")
         log("[REF] Ignored: scan running.", "warn")
         return
+    # A reference run is a real motor move, so it must not overlap a Goto/Jog
+    # either -- state['is_moving'] is the flag those set (see
+    # scan_engine.goto_wavelength_action and the app_context.py comment).
+    if state.get("is_moving"):
+        ui_hook('show_warning', "Busy", "A move is already in progress.")
+        log("[REF] Ignored: move already in progress.", "warn")
+        return
     if state["ser"] is None or not getattr(state["ser"], "is_open", False):
         ui_hook('show_error', "Error", "Not connected.")
         log("[REF] Ignored: not connected.", "warn")
@@ -641,6 +648,10 @@ def reference_run_action(on_done=None):
         except Exception as e:
             log(f"[REF] Reference run failed: {e}", "error")
         finally:
+            # Clear the busy flag first: stop_action()'s background worker
+            # waits on it before re-arming the drive, so it must drop as soon
+            # as this move is really over (see where it is set, below).
+            state['is_moving'] = False
             try:
                 ui_hook('set_reference_button_enabled', True)
             except Exception:
@@ -662,4 +673,13 @@ def reference_run_action(on_done=None):
                 except Exception as e:
                     log(f"[REF] on_done callback failed: {e}", "warn")
 
+    # BUGFIX (Stop during a Reference Run did not stop): this move set no busy
+    # flag at all, so stop_action()'s was_running check saw neither
+    # is_scanning nor is_moving, skipped its wait entirely and re-armed the
+    # drive (clearing stop_flag) before _worker's wait_until_position() had
+    # necessarily noticed the Stop -- the same race that was fixed for Goto.
+    # Set on the caller's (GUI) thread, before the thread starts, so the
+    # busy check above and this assignment cannot be interleaved by a second
+    # click. Cleared in _worker's finally block on every exit path.
+    state['is_moving'] = True
     threading.Thread(target=_worker, daemon=True).start()

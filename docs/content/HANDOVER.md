@@ -183,6 +183,18 @@ Bookkeeping-Arithmetik, nicht reales Motor-/Serial-Timing oder die
   `state['is_moving']`-Flag schließt die Lücke; ein zugehöriger `fsm`-Bug
   (zeigte „IDLE" während eines laufenden Auto-Recover-Retries) ebenfalls
   behoben.
+- **Nachtrag aus dem Selbst-Review derselben Session (vier Folgefehler,
+  alle behoben, SIM-verifiziert):** (A) `read_position()` liefert bei
+  Lesefehler still `0` — die neuen Re-Anchor-Stellen schrieben das ungeprüft
+  in den Positions-Ursprung; jetzt über `_encoder_nm_or_none()` /
+  `read_position_or_none()` abgesichert. (B) Ein Stop während eines Go To
+  wurde vom Auto-Recover-Retry ignoriert, der trotzdem ans Originalziel fuhr
+  — jetzt wird `stop_flag` vor dem Re-Arm ausgewertet und bei Nutzer-Stop
+  nicht mehr nachgefahren. (C) Die Referenzfahrt setzte kein Busy-Flag und
+  lief damit weiter in die alte Stop-Race — setzt jetzt `is_moving`. (D) Go To
+  hatte keinen Reentrancy-Schutz (Doppelklick/Jog-Spam startete zwei Worker)
+  — Guard ergänzt, Flag wird auf dem GUI-Thread vor dem Thread-Start gesetzt.
+  Details in `BACKLOG.md` P0, Abschnitt „Nachtrag".
 - **Defect C nur teilweise entschärft, kein Fix.** Re-Anchor gegen die
   kompensations-bereinigte Encoder-Position nach GoTo/Scan-Ende ergänzt
   (Muster wie `free_run_worker`), bewusst NICHT `comp` blind ins Label

@@ -83,6 +83,57 @@ mechanische Relaxation sind als Ursache ausgeschlossen (Begründungen in
       am Rig gegen den echten Backlash verifizieren/kalibrieren
       (`backlash_cal.py`).
 
+### Nachtrag 2026-08-04 (Selbst-Review der obigen Fixes)
+
+Beim Durchgehen der eigenen Änderungen sind vier Folgefehler aufgefallen,
+zwei davon gravierender als die ursprünglich geflaggten Punkte. Alle vier
+behoben und in SIM verifiziert (`verify_abcd.py`-Szenarien, s. HISTORY.md):
+
+- [x] **A — `read_position()` liefert bei Lesefehler still `0`.** Die fünf
+      neuen Re-Anchor-Stellen schrieben diesen erfundenen Wert ungeprüft in
+      `state['current_nm']`/`entry_current` — also in den Ursprung, aus dem
+      jeder Folge-Move sein Delta rechnet und den `app_config` als
+      `last_current_nm` persistiert. Die umgebenden `try/except` halfen nicht,
+      weil `read_position()` **nie wirft**. Wirkung im SIM-Test: das alte
+      Verhalten hätte 4.0 nm danebengelegen (wächst mit der Sessiondauer, da
+      `POS` frei läuft). Fix: neuer Helper `_encoder_nm_or_none()` nutzt
+      `read_position_or_none()`; bei `None` behält jede Stelle ihre bisherige
+      Schätzung und loggt eine Warnung. Zusätzlich `do_resume` gehärtet: der
+      Anker `curr_abs` kam ebenfalls aus `read_position()` — schlägt der Read
+      fehl, wird der Schritt jetzt abgebrochen statt aus einer erfundenen
+      Position heraus ein Relativ-Kommando zu schicken.
+- [x] **B — Stop während eines Go To stoppte nicht.** Der Auto-Recover-Retry
+      konnte „Nutzer-Stop" nicht von „Timeout/Fault" unterscheiden und fuhr
+      nach dem Abbruch trotzdem ans Originalziel. Im SIM-Log der Vorsession
+      stand das wörtlich (`[DONE] Reached 531.000 nm (after auto-recover)`
+      nach einem Stop bei 1/3 der Strecke) — beim ersten Lesen als Erfolg
+      fehlinterpretiert. Der `is_moving`-Fix hatte es sogar verschärft, weil
+      `stop_action()` nun bis zu 10 s wartet und dem Retry mehr Zeit gibt.
+      Fix: `stop_flag` wird **vor** `recover_after_stop()` ausgelesen; bei
+      Nutzer-Stop wird nur noch re-verankert, nicht erneut gefahren, und
+      `recover_after_stop()` bleibt `stop_action()` überlassen.
+- [x] **C — Referenzfahrt setzte gar kein Busy-Flag.** Damit lief ein Stop
+      während einer Referenzfahrt weiterhin in die ursprüngliche Race
+      (`stop_action()` sah weder `is_scanning` noch `is_moving`, übersprang
+      die Wartephase und re-armte den Antrieb). Fix: `reference_run_action`
+      setzt/löscht `is_moving` wie `goto_worker`.
+- [x] **D — Go To war nicht gegen Mehrfachstart geschützt.** Nur
+      `is_scanning` wurde geprüft; ein Doppelklick auf Go To oder Jog
+      (ein Jog IST ein Go To) startete zwei `goto_worker` und machte
+      `is_moving` unzuverlässig, weil der zuerst fertige Worker das Flag
+      löschte. Fix: Reentrancy-Guard auf `is_moving`, und das Flag wird jetzt
+      auf dem GUI-Thread **vor** dem Thread-Start gesetzt — das schließt
+      zusätzlich das Fenster von einem Thread-Start, in dem ein Stop das Flag
+      noch nicht sehen konnte.
+
+**Noch offen aus demselben Review (nicht gefixt, bewusst):** die Log-Schwelle
+`1e-4` nm in den Erfolgs-Re-Anchors liegt unter der legitimen
+Ankunftstoleranz (`POS_TOL_STEPS` = 90 Schritte ≈ 2.5e-4 nm) → die
+„Re-anchoring"-Zeile feuert bei praktisch jedem Move statt nur bei echter
+Slip-Fehlkalibrierung. Ebenfalls offen: der Teilweg-Re-Anchor schätzt den
+Slack-Anteil mit 0, obwohl „Spiel wird zuerst aufgenommen" eine strikt
+bessere Schranke (`min(comp, gefahrene Strecke)`) erlauben würde.
+
 ### Arbeitsschritte
 
 - [x] `stage1_diag.patch` angewendet (fertig, verifiziert: 3 Hunks, additiv,

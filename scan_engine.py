@@ -72,6 +72,38 @@ def _plot():
     return refs.get('plot_mgr')
 
 
+def _encoder_nm_or_none(anchor_steps, anchor_nm, slack_steps=0):
+    """Convert the CURRENT encoder position into a wavelength, or return None
+    if the POS read failed.
+
+    WHAT/WHY: every re-anchor site in this file (goto success, goto retry,
+    interrupted scan step, normal scan end, interrupted resume step) writes
+    its result into state['current_nm'] / refs['entry_current'] -- the origin
+    every later move derives its delta from, and the value app_config
+    persists as last_current_nm. read_position() must NOT be used for that:
+    it returns a silent 0 on a failed or garbled reply (see
+    protocol_faulhaber.read_position, and the read_position_or_none docstring
+    right next to it, which spells out exactly this hazard for callers that
+    use the raw value directly). A fabricated 0 becomes a wavelength off by
+    steps_to_delta_nm(anchor) -- tens of nm once POS has run up during a
+    session, because POS is a free-running absolute counter -- and that
+    poisoned origin is then inherited by every subsequent move.
+    Returning None instead lets each caller keep the estimate it already had.
+
+    WHEN: called from the re-anchor paths listed above, always right after the
+    motor has come to rest.
+
+    anchor_steps/anchor_nm: a (steps, nm) pair known to be consistent with
+    each other. slack_steps: backlash-compensation steps to EXCLUDE from the
+    result -- they turn the motor without moving the grating, so they are not
+    wavelength travel (same reasoning as free_run_worker's nm_anchor_steps).
+    """
+    pos = read_position_or_none()
+    if pos is None:
+        return None
+    return anchor_nm + steps_to_delta_nm(pos - anchor_steps - slack_steps)
+
+
 def validate_goto_input():
     try:
         tgt = _float_or_none(refs['entry_goto'].get())
@@ -199,6 +231,16 @@ def goto_wavelength_action():
     if state["is_scanning"]:
         refs['messagebox'].showwarning("Busy", "Cannot GOTO while scanning.")
         return
+    # BUGFIX (re-entrancy): a GoTo is not covered by is_scanning, so nothing
+    # used to stop a second one from starting on top of a running one -- a
+    # double-click on Go To, or on a Jog button (jog_*_action IS a GoTo,
+    # see CONTEXT.md), spawned two goto_workers driving the same axis from
+    # two different origins. It also made state['is_moving'] unreliable:
+    # whichever worker finished first cleared the flag while the other was
+    # still moving, which is exactly the signal stop_action() now waits on.
+    if state.get("is_moving"):
+        refs['messagebox'].showwarning("Busy", "A move is already in progress.")
+        return
     if not ser_ok():
         refs['messagebox'].showerror("Error", "Not connected.")
         return
@@ -212,11 +254,6 @@ def goto_wavelength_action():
 
     def goto_worker():
         set_fsm("MOVING")
-        # BUGFIX (Stop/GoTo race -- see BACKLOG.md/CONTEXT.md P0): tells
-        # stop_action() a GoTo is in flight, the same way is_scanning tells
-        # it a scan is in flight. See the state['is_moving'] comment in
-        # app_context.py for the race this closes.
-        state['is_moving'] = True
         try:
             # Lock controls during goto
             refs['btn_goto'].configure(state="disabled")
@@ -273,10 +310,16 @@ def goto_wavelength_action():
                 # target_nm (verified in SIM: sim_defect_probe.py); if the
                 # slip is miscalibrated, this catches the mismatch on every
                 # move instead of letting it accumulate silently.
-                final_pos = read_position()
-                nm_anchor_steps = anchor_steps + comp
-                real_nm = anchor_nm + steps_to_delta_nm(final_pos - nm_anchor_steps)
-                if abs(real_nm - target_nm) > 1e-4:
+                real_nm = _encoder_nm_or_none(anchor_steps, anchor_nm, slack_steps=comp)
+                if real_nm is None:
+                    # POS unreadable -- fall back to the commanded target
+                    # (the behaviour before this re-anchor existed) instead
+                    # of writing a fabricated position into the origin every
+                    # later move derives from. See _encoder_nm_or_none().
+                    log("[WARN] Could not read POS after move; keeping commanded "
+                        f"target {target_nm:.3f} nm as the position estimate.", "warn")
+                    real_nm = target_nm
+                elif abs(real_nm - target_nm) > 1e-4:
                     log(f"[DONE] Re-anchoring to real position: target was "
                         f"{target_nm:.3f} nm, encoder-frame actual "
                         f"{real_nm:.3f} nm (comp-adjusted).")
@@ -290,22 +333,45 @@ def goto_wavelength_action():
 
             else:
                 log("[STOP] Motion interrupted")
-                # Auto-recover once and retry the goto
-                recover_after_stop()
-                # BUGFIX (fsm lying about an in-flight retry -- found while
-                # verifying the Stop/GoTo race fix above): recover_after_stop()
-                # unconditionally sets fsm to IDLE as part of its normal
-                # re-arm sequence (protocol_faulhaber.py). That's correct
-                # when IT is what ends a move, but here goto_worker calls it
-                # mid-retry and then immediately starts a SECOND real move --
-                # without this line, fsm reported IDLE while the retry was
-                # still silently in progress (state['is_moving'] stayed True
-                # throughout -- it's only cleared in this worker's own
-                # finally block -- but fsm is the signal both the GUI and
-                # test/probe code actually poll).
-                set_fsm("MOVING")
-                init_motor()
-                current_steps = read_position()
+                # BUGFIX (Stop was not actually stopping -- see BACKLOG.md/
+                # CONTEXT.md P0): capture WHY the move ended, BEFORE
+                # recover_after_stop() below clears state['stop_flag'] as part
+                # of re-arming. wait_until_position() returns False both for a
+                # user Stop and for a timeout/fault, and the auto-recover
+                # retry below cannot tell them apart -- so pressing Stop
+                # during a GoTo used to abort the move and then immediately
+                # drive to the original target anyway. Observed verbatim in
+                # SIM (sim_defect_probe.py): Stop at ~1/3 of an 8 nm move,
+                # followed by "[DONE] Reached 531.000 nm (after auto-recover)"
+                # with the encoder confirming the drive really went the full
+                # distance. Retrying is right after a transient fault; it is
+                # never right after the operator asked for a stop.
+                user_stop = bool(state.get("stop_flag"))
+                if user_stop:
+                    # Do NOT re-arm here: stop_action()'s own background worker
+                    # owns recover_after_stop() in this case and is already
+                    # waiting for state['is_moving'] to clear (see there).
+                    # Calling it a second time from here would clear stop_flag
+                    # underneath that worker. Reading POS needs no re-arm --
+                    # safe_stop() above already left the link usable.
+                    current_steps = read_position_or_none()
+                else:
+                    # Auto-recover once and retry the goto
+                    recover_after_stop()
+                    # BUGFIX (fsm lying about an in-flight retry -- found while
+                    # verifying the Stop/GoTo race fix above): recover_after_stop()
+                    # unconditionally sets fsm to IDLE as part of its normal
+                    # re-arm sequence (protocol_faulhaber.py). That's correct
+                    # when IT is what ends a move, but here goto_worker calls it
+                    # mid-retry and then immediately starts a SECOND real move --
+                    # without this line, fsm reported IDLE while the retry was
+                    # still silently in progress (state['is_moving'] stayed True
+                    # throughout -- it's only cleared in this worker's own
+                    # finally block -- but fsm is the signal both the GUI and
+                    # test/probe code actually poll).
+                    set_fsm("MOVING")
+                    init_motor()
+                    current_steps = read_position_or_none()
                 # BUGFIX (Defect B, "desync after Stop" -- see BACKLOG.md/
                 # CONTEXT.md P0): current_nm_ui used to be re-read from
                 # refs['entry_current'], which is NEVER updated while a GoTo
@@ -336,16 +402,38 @@ def goto_wavelength_action():
                 # value is the best available estimate (see HANDOVER.md:
                 # "POS is the encoder -- it proves the servo positioned,
                 # not that the grating moved").
-                current_nm_ui = anchor_nm + steps_to_delta_nm(current_steps - anchor_steps)
-                if abs(current_nm_ui - state.get("current_nm", current_nm_ui)) > 1e-6:
-                    log(f"[STOP] Re-anchoring to real position: "
-                        f"{state.get('current_nm', current_nm_ui):.3f} -> "
-                        f"{current_nm_ui:.3f} nm (read back from POS after interrupted move).")
-                state["current_nm"] = current_nm_ui
-                try:
-                    refs['entry_current'].delete(0, "end"); refs['entry_current'].insert(0, f"{current_nm_ui:.3f}")
-                except Exception:
-                    pass
+                # current_steps is None if the POS read failed -- keep the
+                # label untouched rather than writing a fabricated position
+                # (see _encoder_nm_or_none() for why that matters here).
+                if current_steps is None:
+                    log("[WARN] Could not read POS after interrupted move; "
+                        "position estimate left unchanged and possibly stale.", "warn")
+                    current_nm_ui = float(state.get("current_nm", anchor_nm))
+                else:
+                    current_nm_ui = anchor_nm + steps_to_delta_nm(current_steps - anchor_steps)
+                    if abs(current_nm_ui - state.get("current_nm", current_nm_ui)) > 1e-6:
+                        log(f"[STOP] Re-anchoring to real position: "
+                            f"{state.get('current_nm', current_nm_ui):.3f} -> "
+                            f"{current_nm_ui:.3f} nm (read back from POS after interrupted move).")
+                    state["current_nm"] = current_nm_ui
+                    try:
+                        refs['entry_current'].delete(0, "end"); refs['entry_current'].insert(0, f"{current_nm_ui:.3f}")
+                    except Exception:
+                        pass
+                if user_stop:
+                    # Operator asked for a stop: the label now reflects where
+                    # the drive actually is, and that is all this worker does.
+                    # No retry -- see the note where user_stop is captured.
+                    log("[STOP] Goto aborted by operator -- not retrying.")
+                    return
+                if current_steps is None:
+                    # A retry needs a trustworthy origin; without POS there is
+                    # none, and a relative move from a guessed position is
+                    # exactly the class of error this whole section fixes.
+                    log("[ERROR] Goto: no usable POS after interrupted move; "
+                        "not retrying. Re-anchor with 'Known λ here' before "
+                        "the next move.", "error")
+                    return
                 # Fresh anchor for the RETRY's own success re-anchor below --
                 # current_steps/current_nm_ui are consistent with each other
                 # at this exact point (just established above).
@@ -366,10 +454,13 @@ def goto_wavelength_action():
                 if reached2:
                     # Same comp-adjusted re-anchor as the first attempt's
                     # success path (Defect C) -- see the comment there.
-                    final_pos = read_position()
-                    nm_anchor_steps = retry_anchor_steps + comp
-                    real_nm = retry_anchor_nm + steps_to_delta_nm(final_pos - nm_anchor_steps)
-                    if abs(real_nm - target_nm) > 1e-4:
+                    real_nm = _encoder_nm_or_none(retry_anchor_steps, retry_anchor_nm,
+                                                  slack_steps=comp)
+                    if real_nm is None:
+                        log("[WARN] Could not read POS after move; keeping commanded "
+                            f"target {target_nm:.3f} nm as the position estimate.", "warn")
+                        real_nm = target_nm
+                    elif abs(real_nm - target_nm) > 1e-4:
                         log(f"[DONE] Re-anchoring to real position: target was "
                             f"{target_nm:.3f} nm, encoder-frame actual "
                             f"{real_nm:.3f} nm (comp-adjusted).")
@@ -391,6 +482,20 @@ def goto_wavelength_action():
             if state.get("fsm") == "MOVING":
                 set_fsm("IDLE")
 
+    # BUGFIX (Stop/GoTo race -- see BACKLOG.md/CONTEXT.md P0): tells
+    # stop_action() a GoTo is in flight, the same way is_scanning tells it a
+    # scan is in flight. See the state['is_moving'] comment in app_context.py
+    # for the race this closes.
+    # Set HERE, on the GUI thread, immediately before the thread is started --
+    # NOT inside goto_worker. Two reasons: (1) the re-entrancy guard at the
+    # top of this function then does its check-and-set without a window in
+    # between (Qt serialises GUI callbacks on one thread, so no other GoTo can
+    # slip through); (2) setting it inside the worker left a gap of one thread
+    # start-up: a Stop pressed in that gap saw is_moving still False, so
+    # stop_action() skipped its wait and re-armed the drive underneath a GoTo
+    # that was about to begin. Cleared in goto_worker's finally block, which
+    # runs on every exit path.
+    state['is_moving'] = True
     threading.Thread(target=goto_worker, daemon=True).start()
 
 def scan_action():
@@ -608,17 +713,25 @@ def scan_action():
                     # take-up vs. optical (same reasoning as the partial-move
                     # re-anchor in goto_worker's interrupted branch).
                     try:
-                        final_pos = read_position()
-                        real_nm = s_nm + steps_to_delta_nm(final_pos - grid_anchor_steps - grid_slack_steps_before)
-                        if abs(real_nm - pos_nm) > 1e-6:
-                            log(f"[STOP] Re-anchoring to real position: "
-                                f"{pos_nm:.3f} -> {real_nm:.3f} nm "
-                                f"(read back from POS after interrupted step).")
-                        pos_nm = real_nm
-                        state["current_nm"] = pos_nm
-                        state['planned_params']['last_nm'] = pos_nm
-                        refs['entry_current'].delete(0, "end")
-                        refs['entry_current'].insert(0, f"{pos_nm:.3f}")
+                        real_nm = _encoder_nm_or_none(grid_anchor_steps, s_nm,
+                                                      slack_steps=grid_slack_steps_before)
+                        if real_nm is None:
+                            # POS unreadable -- keep the last completed step as
+                            # the estimate instead of writing a fabricated
+                            # position (see _encoder_nm_or_none()).
+                            log("[STOP] Could not read POS after interrupted step; "
+                                "position estimate left at the last completed "
+                                "step and possibly stale.", "warn")
+                        else:
+                            if abs(real_nm - pos_nm) > 1e-6:
+                                log(f"[STOP] Re-anchoring to real position: "
+                                    f"{pos_nm:.3f} -> {real_nm:.3f} nm "
+                                    f"(read back from POS after interrupted step).")
+                            pos_nm = real_nm
+                            state["current_nm"] = pos_nm
+                            state['planned_params']['last_nm'] = pos_nm
+                            refs['entry_current'].delete(0, "end")
+                            refs['entry_current'].insert(0, f"{pos_nm:.3f}")
                     except Exception as e:
                         log(f"[STOP] Could not re-anchor after interrupted step: {e}", "warn")
                     break
@@ -684,9 +797,15 @@ def scan_action():
                 # in use; with a mismatch it corrects it instead of letting
                 # it silently accumulate.
                 try:
-                    final_pos = read_position()
-                    real_nm = s_nm + steps_to_delta_nm(final_pos - grid_anchor_steps - grid_slack_steps)
-                    if abs(real_nm - pos_nm) > 1e-4:
+                    real_nm = _encoder_nm_or_none(grid_anchor_steps, s_nm,
+                                                  slack_steps=grid_slack_steps)
+                    if real_nm is None:
+                        # POS unreadable -- keep the commanded grid arithmetic
+                        # (pos_nm) instead of writing a fabricated position
+                        # (see _encoder_nm_or_none()).
+                        log("[WARN] Could not read POS at scan end; final position "
+                            "not verified against the encoder.", "warn")
+                    elif abs(real_nm - pos_nm) > 1e-4:
                         log(f"[DONE] Re-anchoring to real position: {pos_nm:.3f} -> "
                             f"{real_nm:.3f} nm (read back from POS, slack-adjusted).")
                         pos_nm = real_nm
@@ -1205,9 +1324,23 @@ def do_resume():
             log(f"{pos_nm:.3f} nm  |  {v:.5f} V")
 
             pos_nm_next = pos_nm + st_nm*direction
-            curr_abs = read_position()
-            # Fold in backlash compensation on a direction reversal; normally
-            # a no-op here since direction is unchanged across a pause/resume.
+            # read_position_or_none(), not read_position(): this value is both
+            # the base of the relative move commanded just below AND the anchor
+            # the interrupted-branch re-anchor converts against. read_position()
+            # returns a silent 0 on a failed reply, which would command a move
+            # from a fabricated origin and then write an equally fabricated
+            # wavelength into the label (see _encoder_nm_or_none()).
+            curr_abs = read_position_or_none()
+            if curr_abs is None:
+                safe_stop()
+                log("[STOP] Resume: POS unreadable; refusing to command a move "
+                    "from an unknown position. Re-anchor with 'Known λ here' "
+                    "before resuming.", "error")
+                break
+            # Fold in backlash compensation on a direction reversal. Usually a
+            # no-op across a pause/resume (direction is unchanged), but NOT
+            # always: a jog while paused flips state['last_move_direction'],
+            # so the first resumed step then does get a compensation.
             step_steps_this_move = rel_step_steps + reversal_compensation_steps(direction)
             target_abs = curr_abs + step_steps_this_move
             state["current_step_target_abs"] = target_abs
@@ -1229,19 +1362,25 @@ def do_resume():
                 # (curr_abs, already read above), paired with pos_nm (the
                 # label before this failed step).
                 try:
-                    final_pos = read_position()
-                    real_nm = pos_nm + steps_to_delta_nm(final_pos - curr_abs)
-                    if abs(real_nm - pos_nm) > 1e-6:
-                        log(f"[STOP] Re-anchoring to real position: "
-                            f"{pos_nm:.3f} -> {real_nm:.3f} nm "
-                            f"(read back from POS after interrupted step).")
-                    pos_nm = real_nm
-                    state['planned_params']['last_nm'] = pos_nm
-                    state["current_nm"] = pos_nm
-                    try:
-                        refs['entry_current'].delete(0, "end"); refs['entry_current'].insert(0, f"{pos_nm:.3f}")
-                    except Exception:
-                        pass
+                    real_nm = _encoder_nm_or_none(curr_abs, pos_nm)
+                    if real_nm is None:
+                        # POS unreadable -- keep the last completed step as the
+                        # estimate (see _encoder_nm_or_none()).
+                        log("[STOP] Could not read POS after interrupted step; "
+                            "position estimate left at the last completed step "
+                            "and possibly stale.", "warn")
+                    else:
+                        if abs(real_nm - pos_nm) > 1e-6:
+                            log(f"[STOP] Re-anchoring to real position: "
+                                f"{pos_nm:.3f} -> {real_nm:.3f} nm "
+                                f"(read back from POS after interrupted step).")
+                        pos_nm = real_nm
+                        state['planned_params']['last_nm'] = pos_nm
+                        state["current_nm"] = pos_nm
+                        try:
+                            refs['entry_current'].delete(0, "end"); refs['entry_current'].insert(0, f"{pos_nm:.3f}")
+                        except Exception:
+                            pass
                 except Exception as e:
                     log(f"[STOP] Could not re-anchor after interrupted step: {e}", "warn")
                 break
