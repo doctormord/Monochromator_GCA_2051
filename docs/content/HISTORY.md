@@ -825,3 +825,51 @@ routinemäßig statt nur bei echter Slip-Fehlkalibrierung; und der
 Teilweg-Re-Anchor schätzt den Slack-Anteil weiterhin mit 0, obwohl „Spiel
 wird zuerst aufgenommen" eine strikt bessere Schranke erlauben würde.
 Weiterhin gilt: alles nur SIM-verifiziert, keine Rig-Session.
+
+## 2026-08-04
+
+Die beiden zurückgestellten Review-Punkte nachgezogen — und dabei die
+Defect-C-Herleitung erstmals quantitativ bestätigt.
+
+**Log-Schwelle.** Die Schwelle der Erfolgs-Re-Anchors war mit `1e-4` nm frei
+gewählt und lag unter der Ankunftstoleranz, die die App selbst akzeptiert
+(`POS_TOL_STEPS` = 90 Schritte = 2.49e-4 nm). Neue Konstante
+`REANCHOR_LOG_TOL_NM = POS_TOL_STEPS / STEPS_PER_NM` in
+`device_constants.py`. Dabei die eigene Einschätzung korrigiert: „feuert bei
+praktisch jedem Move" war überzogen — die Meldung konnte nur im Band
+0.1–0.249 pm auslösen (der Antriebs-Korridor `GCORRIDOR` = 20 Schritte =
+0.055 pm liegt darunter), und im SIM-Lauf feuerte sie null Mal. Die Häufigkeit
+am Rig bleibt ungemessen; die Ableitung macht die Frage gegenstandslos, weil
+die Meldung jetzt per Konstruktion „außerhalb der akzeptierten
+Ankunftstoleranz" bedeutet und `POS_TOL_STEPS` automatisch folgt. (Eine
+Zwischenrechnung war zunächst um Faktor 1e9 falsch — nm→pm ist ×1000, nicht
+×1e12; korrigiert, bevor daraus eine Entscheidung wurde.)
+
+**Slack-first.** Die Teilweg-Re-Anchors behandelten den gesamten Encoder-Weg
+als optische Bewegung. Unter dem Modell, auf dem die ganze Kompensation
+beruht, wird das Spiel jedoch **zuerst** aufgenommen — der Anteil ist also
+deterministisch bekannt, nicht unbekannt, wie ein eigener Kommentar behauptet
+hatte. Neuer Helper `_slack_consumed_steps()`, angewendet in `goto_worker`
+(Interrupted), `scan_worker` (Interrupted-Step) und `do_resume` — dort musste
+`comp` erst separat geführt werden, weil es bisher direkt in
+`step_steps_this_move` eingerechnet wurde. SIM-Beleg (`verify_slack.py`):
+Stop innerhalb des Spiels nach einer Umkehr → Encoder +0.028 nm, Optik
+0.000 nm, Label 0.000 nm. Vorher hätte das Label den vollen Encoder-Weg
+übernommen, bis zu einem ganzen Slip (0.082 nm).
+
+**Bestätigung der C-Herleitung.** Nach dem Fix meldete `sim_defect_probe.py`
+für den abgebrochenen Reversal-GoTo zunächst scheinbar schlechtere Zahlen
+(`label − encoder_truth = −0.09074 nm`). Ursache war nicht der Code, sondern
+die Messlatte: die Probe verglich weiter gegen den **Encoder**, während der
+Code seit dem Slack-Fix bewusst die **Optik** modelliert. Probe deshalb auf
+`make_optical_anchor()` umgestellt (eigener Anker, weil die Optik nach dem
+Setzen um eine konstante Spielbreite hinter dem Encoder steht). Ergebnis:
+Section 4 exakt `+0.00000 nm`, Section 3 `−0.00874 nm` — und das ist auf die
+Stelle genau `slip_konfiguriert (0.09074) − backlash_real (0.082)`. Damit ist
+die bis dahin nur algebraisch hergeleitete Aussage „der Fehler skaliert mit
+der Kalibrierabweichung, nicht mit dem Backlash" gemessen. Praktische Folge
+für P0: der Restoffset ist ausschließlich über eine `slip_nm`-Kalibrierung am
+Rig (`backlash_cal.py`) zu verkleinern, nicht über weiteren Code.
+
+Regression: `verify_abcd.py` weiterhin 4× PASS, `sim_defect_probe.py` sauber.
+Unverändert gilt: alles SIM-verifiziert, keine Rig-Session.

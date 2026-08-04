@@ -126,13 +126,40 @@ behoben und in SIM verifiziert (`verify_abcd.py`-Szenarien, s. HISTORY.md):
       zusätzlich das Fenster von einem Thread-Start, in dem ein Stop das Flag
       noch nicht sehen konnte.
 
-**Noch offen aus demselben Review (nicht gefixt, bewusst):** die Log-Schwelle
-`1e-4` nm in den Erfolgs-Re-Anchors liegt unter der legitimen
-Ankunftstoleranz (`POS_TOL_STEPS` = 90 Schritte ≈ 2.5e-4 nm) → die
-„Re-anchoring"-Zeile feuert bei praktisch jedem Move statt nur bei echter
-Slip-Fehlkalibrierung. Ebenfalls offen: der Teilweg-Re-Anchor schätzt den
-Slack-Anteil mit 0, obwohl „Spiel wird zuerst aufgenommen" eine strikt
-bessere Schranke (`min(comp, gefahrene Strecke)`) erlauben würde.
+Die beiden zunächst zurückgestellten Punkte sind inzwischen ebenfalls
+erledigt:
+
+- [x] **Log-Schwelle aus `POS_TOL_STEPS` abgeleitet** statt frei gewählt.
+      Neue Konstante `REANCHOR_LOG_TOL_NM = POS_TOL_STEPS / STEPS_PER_NM`
+      (≈ 2.49e-4 nm) in `device_constants.py`, benutzt an den drei
+      Erfolgs-Re-Anchors. Vorher hartkodiert `1e-4` nm — **unterhalb** der
+      Ankunftstoleranz, die die App selbst als „angekommen" akzeptiert.
+      Korrektur zur ersten Einschätzung: die Behauptung „feuert bei
+      praktisch jedem Move" war überzogen — die Meldung konnte nur im Band
+      0.1–0.249 pm feuern (der Antriebs-Korridor `GCORRIDOR` = 20 Schritte
+      = 0.055 pm liegt darunter), und in SIM feuerte sie 0×. Wie oft es am
+      Rig passiert wäre, ist unbekannt; die Ableitung macht die Frage
+      gegenstandslos, weil die Meldung jetzt per Konstruktion „außerhalb
+      dessen, was die App als angekommen akzeptiert" bedeutet und einer
+      künftigen `POS_TOL_STEPS`-Änderung automatisch folgt.
+- [x] **Teilweg-Re-Anchor rechnet jetzt mit „Spiel wird zuerst
+      aufgenommen".** Neuer Helper `_slack_consumed_steps()`; angewendet in
+      `goto_worker` (Interrupted), `scan_worker` (Interrupted-Step) und
+      `do_resume` (dort musste `comp` erst separat geführt werden). Der
+      frühere Kommentar „no way to know" war schlicht falsch: unter genau
+      dem Modell, auf dem die gesamte Kompensation beruht, ist der Anteil
+      deterministisch. SIM-Beleg (`verify_slack.py`): Stop innerhalb des
+      Spiels nach einer Umkehr → Encoder +0.028 nm, Optik 0.000 nm, Label
+      **0.000 nm**; das alte Verhalten hätte den vollen Encoder-Weg als
+      Wellenlängenänderung geschrieben (bis zu 1 Slip = 0.082 nm).
+
+**Nebenbefund mit Signalwert:** nach dem Fix zeigt der Probe-Lauf für einen
+abgebrochenen Reversal-GoTo `label − optische Wahrheit = −0.00874 nm` — das
+ist auf die Stelle genau `slip_konfiguriert (0.09074) − backlash_real
+(0.082)`. Damit ist die Defect-C-Herleitung (Fehler skaliert mit der
+Kalibrierabweichung, nicht mit dem Backlash selbst) erstmals quantitativ
+bestätigt, und es zeigt direkt, was eine `slip_nm`-Kalibrierung am Rig
+bringen würde.
 
 ### Arbeitsschritte
 

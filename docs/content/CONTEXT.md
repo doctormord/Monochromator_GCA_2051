@@ -126,6 +126,26 @@ zeigte `fsm` fälschlich „IDLE", während der Retry-Move noch lief. Auch behob
 (`set_fsm("MOVING")` direkt nach dem `recover_after_stop()`-Aufruf im
 Interrupted-Zweig).
 
+**Quantitative Bestätigung der C-Herleitung (2026-08-04).** Nach dem
+Slack-first-Fix (s.u.) misst `sim_defect_probe.py` für einen abgebrochenen
+Reversal-GoTo `label − optische Wahrheit = −0.00874 nm`. Das ist exakt
+`slip_konfiguriert (0.09074 nm) − backlash_real (SIM_BACKLASH_NM = 0.082 nm)`.
+Der Fehler skaliert also tatsächlich mit der **Kalibrierabweichung**, nicht
+mit dem Backlash — die vorher nur algebraisch hergeleitete Aussage ist damit
+gemessen. Praktische Folge: der verbleibende Offset lässt sich ausschließlich
+über eine `slip_nm`-Kalibrierung am Rig (`backlash_cal.py`) verkleinern, nicht
+über weiteren Code.
+
+**Zwei Modell-/Schwellenfehler aus dem Review, ebenfalls behoben:** (1) die
+Log-Schwelle der Erfolgs-Re-Anchors lag mit `1e-4` nm unter der
+Ankunftstoleranz `POS_TOL_STEPS` (90 Schritte ≈ 2.49e-4 nm) und ist jetzt
+als `REANCHOR_LOG_TOL_NM` daraus abgeleitet; (2) der Teilweg-Re-Anchor
+behandelte den gesamten Encoder-Weg als optische Bewegung, obwohl das Spiel
+laut Modell **zuerst** aufgenommen wird — jetzt über `_slack_consumed_steps()`
+korrekt aufgeteilt. Ein Stop innerhalb des Spiels lässt das Label damit
+korrekt stehen (SIM: Encoder +0.028 nm, Optik 0.000 nm, Label 0.000 nm),
+statt es um bis zu 1 Slip springen zu lassen.
+
 **Nachtrag — vier Folgefehler aus dem Selbst-Review (behoben, SIM-verifiziert).**
 (A) `read_position()` gibt bei Timeout/Garbage still `0` zurück und wirft nie
 (`protocol_faulhaber.py`) — die neuen Re-Anchor-Stellen schrieben diesen Wert

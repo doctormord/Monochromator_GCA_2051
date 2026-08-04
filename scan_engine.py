@@ -41,6 +41,7 @@ from app_context import state, log, set_fsm, refs, ui_hook, ui_get
 from device_constants import (
     STEPS_PER_NM, SAFE_AFTER_MOVE, SCAN_EPSILON_NM,
     POS_TOL_STEPS, POS_STABLE_COUNT, RAMP_SP, MAX_MOVE_TIMEOUT,
+    REANCHOR_LOG_TOL_NM,
     STOP_JOIN_TIMEOUT_S,
 )
 from protocol_faulhaber import (
@@ -102,6 +103,47 @@ def _encoder_nm_or_none(anchor_steps, anchor_nm, slack_steps=0):
     if pos is None:
         return None
     return anchor_nm + steps_to_delta_nm(pos - anchor_steps - slack_steps)
+
+
+def _slack_consumed_steps(travelled_steps, comp_steps):
+    """How much of a move's backlash compensation was actually taken up, given
+    that the move stopped after `travelled_steps` instead of completing.
+
+    THE MODEL, which the rest of this codebase already assumes: on a direction
+    reversal the drive train has play, and the FIRST comp_steps of travel turn
+    the motor without moving the grating -- that is the entire reason
+    reversal_compensation_steps() adds them to the commanded move in the first
+    place, and it is exactly what sim_hardware._apply_move() implements
+    (encoder advances by the full delta, optics lag by up to one backlash
+    width, slack re-taken-up from zero after each reversal).
+
+    WHY THIS EXISTS: the partial-move re-anchors (interrupted Goto, interrupted
+    scan step, interrupted resume step) convert a raw encoder delta into a
+    wavelength. Treating ALL of that delta as optical travel -- what the code
+    did before -- overstates the wavelength change by up to one full slip
+    (~0.09 nm here) whenever the interrupted move happened to be a reversal.
+    The worst case is a Stop very early in such a move: the grating has not
+    moved at all, yet the label would jump by the whole compensation. Slack is
+    consumed FIRST and deterministically, so the split is known, not guessable
+    -- an earlier comment in this file claiming otherwise was wrong.
+
+    RESIDUAL UNCERTAINTY, stated plainly: comp_steps reflects the CONFIGURED
+    slip, not the true mechanical backlash. If the slip is miscalibrated this
+    correction is wrong by (configured - real) -- but that is strictly smaller
+    than the (configured - 0) error of not correcting at all, which is the
+    premise the whole compensation scheme already rests on.
+
+    Returns steps with the same sign as comp_steps (0 if nothing applies).
+    """
+    if not comp_steps or not travelled_steps:
+        return 0
+    # Travel opposing the compensation means the model does not apply (the
+    # drive did not go where this compensation was aimed) -- claim nothing.
+    if (travelled_steps >= 0) != (comp_steps >= 0):
+        return 0
+    if abs(travelled_steps) >= abs(comp_steps):
+        return comp_steps          # slack fully taken up, rest was optical
+    return travelled_steps         # stopped inside the play: nothing optical yet
 
 
 def validate_goto_input():
@@ -319,7 +361,7 @@ def goto_wavelength_action():
                     log("[WARN] Could not read POS after move; keeping commanded "
                         f"target {target_nm:.3f} nm as the position estimate.", "warn")
                     real_nm = target_nm
-                elif abs(real_nm - target_nm) > 1e-4:
+                elif abs(real_nm - target_nm) > REANCHOR_LOG_TOL_NM:
                     log(f"[DONE] Re-anchoring to real position: target was "
                         f"{target_nm:.3f} nm, encoder-frame actual "
                         f"{real_nm:.3f} nm (comp-adjusted).")
@@ -395,13 +437,13 @@ def goto_wavelength_action():
                 # of trusting the stale UI field. Also re-anchor the label
                 # immediately (not just on eventual retry success), so it
                 # reflects reality even if the retry itself fails too.
-                # NOTE: deliberately NOT comp-adjusted here (unlike the
-                # success re-anchor below) -- this is a PARTIAL move, so
-                # there is no way to know how much of the actual travel so
-                # far was slack take-up vs. optical; the raw encoder-frame
-                # value is the best available estimate (see HANDOVER.md:
-                # "POS is the encoder -- it proves the servo positioned,
-                # not that the grating moved").
+                # Comp-adjusted by the part of the compensation that was
+                # actually consumed: slack is taken up first, so an
+                # interrupted reversal has NOT moved the grating by the full
+                # encoder delta (see _slack_consumed_steps()). An earlier
+                # version of this comment claimed the split was unknowable
+                # and subtracted nothing, which overstated the wavelength
+                # change by up to one slip on every interrupted reversal.
                 # current_steps is None if the POS read failed -- keep the
                 # label untouched rather than writing a fabricated position
                 # (see _encoder_nm_or_none() for why that matters here).
@@ -410,7 +452,9 @@ def goto_wavelength_action():
                         "position estimate left unchanged and possibly stale.", "warn")
                     current_nm_ui = float(state.get("current_nm", anchor_nm))
                 else:
-                    current_nm_ui = anchor_nm + steps_to_delta_nm(current_steps - anchor_steps)
+                    _travelled = current_steps - anchor_steps
+                    _consumed = _slack_consumed_steps(_travelled, comp)
+                    current_nm_ui = anchor_nm + steps_to_delta_nm(_travelled - _consumed)
                     if abs(current_nm_ui - state.get("current_nm", current_nm_ui)) > 1e-6:
                         log(f"[STOP] Re-anchoring to real position: "
                             f"{state.get('current_nm', current_nm_ui):.3f} -> "
@@ -460,7 +504,7 @@ def goto_wavelength_action():
                         log("[WARN] Could not read POS after move; keeping commanded "
                             f"target {target_nm:.3f} nm as the position estimate.", "warn")
                         real_nm = target_nm
-                    elif abs(real_nm - target_nm) > 1e-4:
+                    elif abs(real_nm - target_nm) > REANCHOR_LOG_TOL_NM:
                         log(f"[DONE] Re-anchoring to real position: target was "
                             f"{target_nm:.3f} nm, encoder-frame actual "
                             f"{real_nm:.3f} nm (comp-adjusted).")
@@ -705,16 +749,23 @@ def scan_action():
                     # reproducible in SIM (sim_defect_probe.py): a Stop
                     # mid-step left the label measurably off the true
                     # (encoder-frame) position, uncorrected.
-                    # NOTE: subtracts grid_slack_steps_before (confirmed prior
-                    # reversals only), NOT the current grid_slack_steps --
-                    # this iteration's own `comp` (just added above) is for a
-                    # move that did NOT complete, so there is no way to know
-                    # how much of the actual partial travel was slack
-                    # take-up vs. optical (same reasoning as the partial-move
-                    # re-anchor in goto_worker's interrupted branch).
+                    # Excludes grid_slack_steps_before (all reversals CONFIRMED
+                    # complete before this step) plus however much of THIS
+                    # step's own `comp` the partial travel actually consumed --
+                    # slack is taken up first, so an interrupted reversal has
+                    # not moved the grating by the full encoder delta (see
+                    # _slack_consumed_steps(); the previous version subtracted
+                    # nothing for this step and thus overstated the change by
+                    # up to one slip).
                     try:
-                        real_nm = _encoder_nm_or_none(grid_anchor_steps, s_nm,
-                                                      slack_steps=grid_slack_steps_before)
+                        _pos_now = read_position_or_none()
+                        if _pos_now is None:
+                            real_nm = None
+                        else:
+                            _consumed = _slack_consumed_steps(_pos_now - curr_abs, comp)
+                            real_nm = s_nm + steps_to_delta_nm(
+                                _pos_now - grid_anchor_steps
+                                - grid_slack_steps_before - _consumed)
                         if real_nm is None:
                             # POS unreadable -- keep the last completed step as
                             # the estimate instead of writing a fabricated
@@ -805,7 +856,7 @@ def scan_action():
                         # (see _encoder_nm_or_none()).
                         log("[WARN] Could not read POS at scan end; final position "
                             "not verified against the encoder.", "warn")
-                    elif abs(real_nm - pos_nm) > 1e-4:
+                    elif abs(real_nm - pos_nm) > REANCHOR_LOG_TOL_NM:
                         log(f"[DONE] Re-anchoring to real position: {pos_nm:.3f} -> "
                             f"{real_nm:.3f} nm (read back from POS, slack-adjusted).")
                         pos_nm = real_nm
@@ -1340,8 +1391,11 @@ def do_resume():
             # Fold in backlash compensation on a direction reversal. Usually a
             # no-op across a pause/resume (direction is unchanged), but NOT
             # always: a jog while paused flips state['last_move_direction'],
-            # so the first resumed step then does get a compensation.
-            step_steps_this_move = rel_step_steps + reversal_compensation_steps(direction)
+            # so the first resumed step then does get a compensation. Kept in
+            # its own variable so the interrupted-branch re-anchor below can
+            # exclude the part of it that was actually consumed.
+            comp = reversal_compensation_steps(direction)
+            step_steps_this_move = rel_step_steps + comp
             target_abs = curr_abs + step_steps_this_move
             state["current_step_target_abs"] = target_abs
             send_cmd(f"LR{step_steps_this_move}"); send_cmd("M")
@@ -1362,7 +1416,16 @@ def do_resume():
                 # (curr_abs, already read above), paired with pos_nm (the
                 # label before this failed step).
                 try:
-                    real_nm = _encoder_nm_or_none(curr_abs, pos_nm)
+                    # Same slack-first correction as scan_worker's interrupted
+                    # step (see _slack_consumed_steps()); comp is normally 0
+                    # here, but not after a jog during the pause.
+                    _pos_now = read_position_or_none()
+                    if _pos_now is None:
+                        real_nm = None
+                    else:
+                        _consumed = _slack_consumed_steps(_pos_now - curr_abs, comp)
+                        real_nm = pos_nm + steps_to_delta_nm(
+                            _pos_now - curr_abs - _consumed)
                     if real_nm is None:
                         # POS unreadable -- keep the last completed step as the
                         # estimate (see _encoder_nm_or_none()).

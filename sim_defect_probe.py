@@ -37,6 +37,18 @@ fixes applied, see BACKLOG.md P0):
   state['is_moving'] flag (app_context.py), mirrored by is_scanning.
   A related fsm bug (recover_after_stop() resetting fsm to IDLE mid-retry,
   hiding that a second real move was still in flight) was fixed alongside it.
+UPDATE AFTER THE 2026-08-04 REVIEW ROUND: sections 3 and 4 now judge the
+label against the OPTICAL position (ser._optical_pos, via
+make_optical_anchor), not the encoder. scan_engine models the grating since
+the slack-first fix -- an interrupted reversal that stops inside the play
+advances POS while the optics stand still, and the label correctly stays put.
+Judging that against the encoder frame, as this script did before, reported a
+correct label as an error of up to one slip. With the optical reference:
+section 4 comes out at exactly 0.00000 nm, and section 3 at -0.00874 nm --
+which is precisely (configured slip 0.09074 - SIM_BACKLASH_NM 0.082), i.e.
+the slip miscalibration and nothing else. That is the first quantitative
+confirmation of the Defect C reasoning below.
+
 - Defect C is NOT a pure code bug in the way it first looked. Traced with a
   fully instrumented run (trace_backlash2.py pattern): for any reversal move
   that fully exceeds the modelled backlash width, sim_hardware's optical
@@ -159,6 +171,28 @@ def make_anchor(ser):
     return ser._pos, app_context.state["current_nm"]
 
 
+def make_optical_anchor(ser):
+    """Same sync point, but against the GRATING (ser._optical_pos) instead of
+    the encoder.
+
+    WHY BOTH EXIST: after seating, the optics stand a fixed backlash width
+    behind the encoder (optical_lag_steps stays constant until the direction
+    reverses), so an optical position cannot be converted with the ENCODER
+    anchor -- that would report the standing lag as a wavelength error. This
+    anchor is taken at the same instant, so any later divergence between the
+    two frames is real relative movement, not the constant offset.
+
+    WHICH ONE IS THE RIGHT REFERENCE: the optical one. scan_engine now models
+    the grating, not the encoder -- an interrupted reversal that stops inside
+    the play advances POS while the optics stand still, and the label is
+    supposed to follow the optics (see _slack_consumed_steps in
+    scan_engine.py). Judging the label against the encoder frame, as an
+    earlier version of this script did, therefore reports a correct
+    slack-aware label as an error of up to one slip.
+    """
+    return ser._optical_pos, app_context.state["current_nm"]
+
+
 def truth_nm(anchor, steps):
     anchor_steps, anchor_nm = anchor
     return anchor_nm + motion.steps_to_delta_nm(steps - anchor_steps)
@@ -231,10 +265,11 @@ for line in LOG_LINES:
         print("   ", line, flush=True)
 
 # ---------------------------------------------------------------------------
-section("3) DEFECT B repro: Stop mid-GoTo, then compare vs. encoder truth", watchdog_s=60)
+section("3) DEFECT B repro: Stop mid-GoTo, then compare vs. OPTICAL truth", watchdog_s=60)
 # ---------------------------------------------------------------------------
 do_goto(base_nm)
 anchor = make_anchor(ser)
+opt_anchor = make_optical_anchor(ser)
 print(f"reseated at current_nm={app_context.state['current_nm']:.4f}  POS={ser._pos}  (anchor reset)", flush=True)
 
 LOG_LINES.clear()
@@ -268,9 +303,14 @@ time.sleep(0.3)  # let trailing recover_after_stop()/log lines land
 pos_after_stop = ser._pos
 label_after_stop = app_context.state.get("current_nm")
 encoder_truth_after_stop = truth_nm(anchor, pos_after_stop)
+optical_truth_after_stop = truth_nm(opt_anchor, ser._optical_pos)
 print(f"after Stop settled: label current_nm={label_after_stop:.4f}  "
-      f"POS={pos_after_stop}  encoder_truth_nm={encoder_truth_after_stop:.4f}", flush=True)
-print(f"label - encoder_truth = {label_after_stop - encoder_truth_after_stop:+.5f} nm", flush=True)
+      f"POS={pos_after_stop}  encoder_truth_nm={encoder_truth_after_stop:.4f}  "
+      f"optical_truth_nm={optical_truth_after_stop:.4f}", flush=True)
+print(f"label - OPTICAL truth = {label_after_stop - optical_truth_after_stop:+.5f} nm  "
+      f"<-- the one that matters", flush=True)
+print(f"label - encoder truth = {label_after_stop - encoder_truth_after_stop:+.5f} nm  "
+      f"(differs by the slack the grating did not travel)", flush=True)
 
 print("\nrelevant log lines from the interrupted GoTo:", flush=True)
 for line in LOG_LINES:
@@ -313,6 +353,7 @@ section("4) DEFECT A repro: scan interrupted mid-step (label re-anchored?)", wat
 # ---------------------------------------------------------------------------
 do_goto(base_nm)
 anchor = make_anchor(ser)
+opt_anchor = make_optical_anchor(ser)
 print(f"reseated at current_nm={app_context.state['current_nm']:.4f}  POS={ser._pos}  (anchor reset)", flush=True)
 
 LOG_LINES.clear()
@@ -333,13 +374,23 @@ time.sleep(0.3)
 label_after_stop = app_context.state.get("current_nm")
 pos_after_stop = ser._pos
 truth_after_stop = truth_nm(anchor, pos_after_stop)
+optical_after_stop = truth_nm(opt_anchor, ser._optical_pos)
 print(f"label just before Stop request: {label_at_stop_request:.4f} nm "
       f"(POS was {pos_at_stop_request}, true_nm was {truth_nm(anchor, pos_at_stop_request):.4f})", flush=True)
 print(f"label AFTER scan_worker exits : {label_after_stop:.4f} nm  "
-      f"encoder POS={pos_after_stop}  true_nm={truth_after_stop:.4f}", flush=True)
-print(f"label - true_nm after stop    = {label_after_stop - truth_after_stop:+.5f} nm", flush=True)
-print(f"label re-anchored to actual stop position? "
-      f"{'NO -- label unchanged (Defect A)' if label_after_stop == label_at_stop_request else 'YES -- label moved after stop'}", flush=True)
+      f"encoder POS={pos_after_stop}  encoder_truth={truth_after_stop:.4f}  "
+      f"optical_truth={optical_after_stop:.4f}", flush=True)
+print(f"label - OPTICAL truth         = {label_after_stop - optical_after_stop:+.5f} nm  "
+      f"<-- the one that matters", flush=True)
+print(f"label - encoder truth         = {label_after_stop - truth_after_stop:+.5f} nm  "
+      f"(differs by the slack the grating did not travel)", flush=True)
+# NOTE: "label unchanged" is NOT automatically Defect A any more. If the
+# interrupted step stopped INSIDE the backlash, the grating genuinely did not
+# move and an unchanged label is the correct answer -- which is why the
+# verdict below is judged against the optics, not against movement per se.
+_ok = abs(label_after_stop - optical_after_stop) < 1e-4
+print(f"label agrees with the grating? {'YES' if _ok else 'NO -- off by '
+      f'{label_after_stop - optical_after_stop:+.5f} nm'}", flush=True)
 print("\nrelevant log lines:", flush=True)
 for line in LOG_LINES:
     if any(tag in line for tag in ("[STOP]", "[DONE]", "[ERROR]")):

@@ -385,6 +385,29 @@ _POS_TOL_STEPS_BASE = 5
 # that the peak is genuinely resolved rather than smeared.
 POS_TOL_STEPS = 90
 
+# Threshold for the "[DONE] Re-anchoring to real position" log line that the
+# post-move re-anchors in scan_engine.py emit when the encoder disagrees with
+# the commanded target.
+#
+# DERIVED from POS_TOL_STEPS on purpose, not chosen freely. That message is
+# meant to flag ONE thing: a backlash/slip miscalibration, which shifts a move
+# by up to a whole slip (0.09 nm = ~32800 steps, i.e. 360x this tolerance).
+# Anything at or below POS_TOL_STEPS is just the arrival tolerance the app
+# itself accepts as "reached" -- reporting that as a re-anchor would be noise
+# and would bury the signal it exists for.
+#
+# It was previously a hardcoded 1e-4 nm, which sits BELOW the arrival
+# tolerance (90 steps = 2.49e-4 nm): a move settling anywhere between 0.1 pm
+# and 0.25 pm off would have logged a "re-anchor" although it had arrived
+# perfectly legitimately. How often that happens on the rig is unmeasured --
+# in SIM it never fired, because the simulator lands exactly on target, and
+# the drive's own control corridor (GCORRIDOR = 20 steps = 0.055 pm) is
+# narrower than either threshold. Deriving the value here removes the
+# question: the message now means "outside what the app accepts as arrived",
+# whatever the real residual distribution turns out to be, and it follows
+# POS_TOL_STEPS automatically if that is ever retuned.
+REANCHOR_LOG_TOL_NM = POS_TOL_STEPS / float(STEPS_PER_NM)
+
 # How many consecutive polls must lie within tolerance before a position
 # counts as "stably reached" (debounce against single outlier reads).
 POS_STABLE_COUNT = 3
