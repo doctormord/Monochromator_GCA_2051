@@ -9,33 +9,36 @@ Fork von `sk-HTW/monochromator_python_code`.
 
 ## Vor jeder Änderung lesen
 
-| Datei | Inhalt |
-|---|---|
-| `HANDOVER.md` | Aktueller Stand, Architektur/Modulübersicht, rig-bestätigte Fakten |
-| `BACKLOG.md` | Offene Punkte nach Priorität (P0 = aktiver Arbeitsstrang) |
-| `CONTEXT.md` | Technischer Tiefgang: Skalen, Positions-Wahrheiten, laufende Offset-Diagnose |
-| `MANUAL.md` | Vollständiges Handbuch, Single Source (README + PDF werden daraus erzeugt) |
-| `TESTPLAN.md` | Testplan |
+| Datei | Inhalt | Wann lesen |
+|---|---|---|
+| `docs/content/CONTEXT.md` | Technischer Tiefgang: Skalen, Positions-Wahrheiten, laufende Offset-Diagnose | Immer bei Sessionstart |
+| `docs/content/BACKLOG.md` | Offene Punkte nach Priorität (P0 = aktiver Arbeitsstrang) | Immer bei Sessionstart |
+| `docs/content/HANDOVER.md` | Session-Übergabe: aktueller Stand, Architektur/Modulübersicht, rig-bestätigte Fakten | Nur bei Bedarf (explizite Nachfrage oder wenn CONTEXT.md nicht ausreicht) |
+| `docs/content/HISTORY.md` | Chronologisches Log, append-only | Nur bei gezielter Nachfrage nach früheren Entscheidungen/Verlauf — nicht automatisch |
+| `MANUAL.md` | Vollständiges Handbuch, Single Source (README + PDF werden daraus erzeugt) | Bei Aufgaben, die die Doku selbst betreffen |
+| `TESTPLAN.md` | Testplan | Bei Test-bezogenen Aufgaben |
 
 ## Dokumentationsstruktur
 
-Dieses Projekt pflegt vier Doku-Dateien mit unterschiedlichem Zweck:
+Vier Doku-Dateien unter `docs/content/`, mit unterschiedlichem Zweck und
+Lebenszyklus:
 
-- CONTEXT.md — aktueller Projektstand (wird überschrieben)
-- BACKLOG.md — offene Aufgaben (wird gepflegt)
-- HANDOVER.md — Session-Übergabe (wird überschrieben)
-- HISTORY.md — chronologisches Log, append-only
+- `docs/content/CONTEXT.md` — aktueller technischer Stand (wird überschrieben)
+- `docs/content/BACKLOG.md` — offene Aufgaben nach Priorität (wird gepflegt)
+- `docs/content/HANDOVER.md` — Session-Übergabe/Architektur (wird überschrieben)
+- `docs/content/HISTORY.md` — chronologisches Log (append-only)
 
-Regeln für HISTORY.md:
-- Am Ende jeder Arbeitssession einen neuen Eintrag mit Datum (## YYYY-MM-DD)
-  anhängen, der zusammenfasst: was gemacht wurde, welche Entscheidungen
-  getroffen wurden und warum, was noch offen ist.
-- NIE bestehende Einträge in HISTORY.md verändern oder löschen — nur anhängen.
-- Bei Bedarf (z.B. neue Session, unklarer Kontext) darf HISTORY.md gelesen
-  werden, um frühere Entscheidungen nachzuvollziehen — aber nicht automatisch
-  bei jedem Prompt, nur wenn CONTEXT.md/HANDOVER.md nicht ausreichen.
-- Am Ende jeder Session: HANDOVER.md und CONTEXT.md aus dem aktuellen Stand
-  neu schreiben, HISTORY.md nur ergänzen.
+**Session-Ende:**
+- `docs/content/CONTEXT.md` und `docs/content/HANDOVER.md` aus dem aktuellen
+  Stand neu schreiben (überschreiben, nicht anhängen).
+- `docs/content/HISTORY.md` einen neuen Eintrag anhängen (`## YYYY-MM-DD`):
+  was wurde gemacht, welche Entscheidungen wurden getroffen und warum, was
+  ist offen. **NIE** bestehende HISTORY.md-Einträge verändern oder löschen —
+  nur anhängen.
+- `docs/content/HISTORY.md` darf bei Bedarf (neue Session, unklarer Kontext)
+  gelesen werden, um frühere Entscheidungen nachzuvollziehen — aber nicht
+  automatisch bei jedem Prompt, nur wenn CONTEXT.md/HANDOVER.md nicht
+  ausreichen.
 
 ## ⚠️ VERBINDLICHE DOKU-/KOMMENTAR-POLICY (gilt für jede Session, jede Datei)
 
@@ -60,7 +63,9 @@ Claude-Instanz) sieht sie zuerst, bevor irgendein Code angefasst wird.
    fehlerfreien Start bis in die Event-Loop prüfen. Bei GUI-Änderungen
    zusätzlich ein SIM-Smoke-Test (Connect → Scan → Buttons re-enabled).
 7. **Code-Kommentare/Docstrings und alle GUI-Strings sind Englisch.**
-   Prosa in HANDOVER.md/BACKLOG.md/CONTEXT.md bleibt Deutsch (Nutzer-Präferenz).
+   Prosa in `docs/content/HANDOVER.md`, `docs/content/BACKLOG.md`,
+   `docs/content/CONTEXT.md` und `docs/content/HISTORY.md` bleibt Deutsch
+   (Nutzer-Präferenz).
 8. **Hardware-Werte (Timing, Richtung, Rampen) werden nie geraten.** Erst
    auslesen/verifizieren (z.B. `tune_ramp.py`, ein Jog-Test), dann ändern.
    Bei Unsicherheit: Debug-Mitschnitt oder Rig-Test anfordern statt zu raten.
@@ -72,8 +77,8 @@ inkl. modelliertem Backlash. DAQ hat einen wellenlängen-geformten Simulator.
 Damit ist der komplette Scan-Pfad ohne Rig testbar.
 
 Was der SIM-Modus **nicht** beweist: reales Timing, echte Backlash-Beträge,
-Endschalter-Verhalten, optische Bewegung des Gitters. Alles, was in `BACKLOG.md`
-unter P1 steht, braucht das Rig.
+Endschalter-Verhalten, optische Bewegung des Gitters. Alles, was in
+`docs/content/BACKLOG.md` unter P1 steht, braucht das Rig.
 
 ## Nicht anfassen ohne Rücksprache
 
@@ -83,8 +88,8 @@ unter P1 steht, braucht das Rig.
   Absolutzähler über die ganze Session (Grundlage der Offset-Diagnose).
 - `monochromator_python_code_vrs41.py` (ex-Monolith) ist historische Referenz,
   nicht Teil des ausgelieferten Pakets.
-- P2-Punkte in `BACKLOG.md` sind **bewusst** erhaltene Alt-Bugs, keine
-  Aufräumkandidaten.
+- P2-Punkte in `docs/content/BACKLOG.md` sind **bewusst** erhaltene Alt-Bugs,
+  keine Aufräumkandidaten.
 
 ## Aktueller Arbeitsstrang
 
@@ -94,9 +99,9 @@ verifiziert); ausstehend ist die Session mit reproduziertem Offset und deren
 Auswertung.
 
 **Reihenfolge beachten:** Defect A nicht vor der Datenerhebung fixen, sonst ist
-Hypothese H2 nicht mehr testbar. Details in `CONTEXT.md`.
-
+Hypothese H2 nicht mehr testbar. Details in `docs/content/CONTEXT.md`.
 
 ## Git
+
 Lokal arbeiten. Kein `git push`, kein Remote-Zugriff ohne
 ausdrückliche Aufforderung.
