@@ -111,6 +111,10 @@ STEPS_PER_NM = dc.STEPS_PER_NM
 
 
 def section(title, watchdog_s=25):
+    """Print a section banner and (re)arm the faulthandler watchdog for the
+    section that follows, so a hang dumps all thread stacks and hard-exits
+    instead of blocking forever. Called at the start of each numbered
+    section below."""
     faulthandler.cancel_dump_traceback_later()
     print("\n" + "=" * 78, flush=True)
     print(title, flush=True)
@@ -119,6 +123,8 @@ def section(title, watchdog_s=25):
 
 
 def wait_until(pred, timeout=15.0, poll=0.02):
+    """Poll the zero-arg callable `pred` every `poll` seconds until it
+    returns truthy or `timeout` elapses. Returns whether it succeeded."""
     t0 = time.time()
     while time.time() - t0 < timeout:
         if pred():
@@ -128,11 +134,16 @@ def wait_until(pred, timeout=15.0, poll=0.02):
 
 
 def dump_recent_log(n=12):
+    """Print the last `n` lines captured in LOG_LINES (the app's log sink,
+    see app_context.set_log_sink() above and the _sink() function)."""
     for line in LOG_LINES[-n:]:
         print("   ", line, flush=True)
 
 
 def connect_sim():
+    """Point the GUI's port field at the "SIM" pseudo-port and trigger
+    gui_main.on_connect(), then report whether app_context.state['connected']
+    came up True. Must run before any of the goto/scan helpers below."""
     gui_main.entry_port.setText("SIM")
     gui_main.on_connect()
     ok = app_context.state.get("connected")
@@ -141,6 +152,10 @@ def connect_sim():
 
 
 def reference_run():
+    """Run motion.reference_run_action() and wait for the FSM to leave
+    MOVING, then print the resulting current_nm/last_move_direction/POS.
+    Establishes the known-good sync point make_anchor()/make_optical_anchor()
+    rely on."""
     motion.reference_run_action()
     wait_until(lambda: app_context.state.get("fsm") != "MOVING", timeout=10)
     print(f"after reference run: current_nm={app_context.state.get('current_nm')} "
@@ -149,12 +164,18 @@ def reference_run():
 
 
 def do_goto(target_nm, timeout=20.0):
+    """Fill the GUI's Go To field with `target_nm` and trigger
+    scan_engine.goto_wavelength_action(), then wait up to `timeout` seconds
+    for the FSM to leave MOVING."""
     gui_main.entry_goto.setText(f"{target_nm:.3f}")
     scan_engine.goto_wavelength_action()
     wait_until(lambda: app_context.state.get("fsm") != "MOVING", timeout=timeout)
 
 
 def do_scan(start_nm, end_nm, step_nm, wait_ms=0.0, timeout=60.0):
+    """Fill the GUI's Start/End/Step/Wait fields and trigger
+    scan_engine.scan_action(), then wait up to `timeout` seconds for
+    is_scanning to clear and the FSM to leave SCAN."""
     gui_main.entry_start.setText(f"{start_nm:.3f}")
     gui_main.entry_end.setText(f"{end_nm:.3f}")
     gui_main.entry_step.setText(f"{step_nm:.3f}")
@@ -194,6 +215,10 @@ def make_optical_anchor(ser):
 
 
 def truth_nm(anchor, steps):
+    """Convert an absolute step count to nm using the given (steps, nm)
+    anchor pair, via the app's own motion.steps_to_delta_nm() -- the same
+    anchored-delta convention scan_engine.py's own [DIAG] logging uses, so
+    this script's numbers are directly comparable to the app's."""
     anchor_steps, anchor_nm = anchor
     return anchor_nm + motion.steps_to_delta_nm(steps - anchor_steps)
 

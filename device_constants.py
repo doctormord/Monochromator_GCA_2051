@@ -43,10 +43,10 @@ INVERT_DIRECTION = True
 SAFE_AFTER_MOVE = True
 
 # --- "HP0" is NOT a motion command (rig + manual finding) ----------------
-# The app has sent "HP0" since the monolith days alongside EN/V0, evidently in
-# the belief that it was a "halt/hold position" style safety command. It is
-# not. In FAULHABER manual DE_7000_00029 (sections 3.5.3.1 / 7.1.5) HP has
-# exactly ONE meaning, verified by searching every occurrence in the manual:
+# "HP0" is NOT a "halt/hold position" style safety command, despite being
+# sent alongside EN/V0. In FAULHABER manual DE_7000_00029 (sections 3.5.3.1 /
+# 7.1.5) HP has exactly ONE meaning, verified by searching every occurrence
+# in the manual:
 #
 #     HP <Bitmaske>  = Hard Polarity -- which edge/level of each LIMIT SWITCH
 #                      input counts as valid.
@@ -59,43 +59,28 @@ SAFE_AFTER_MOVE = True
 # it silently overrides whatever polarity the drive was commissioned with
 # until the next power-cycle.
 #
-# Consequence if the drive's stored polarity is NOT 0: the hard-blocking
-# limit switches are armed on the WRONG level for the rest of the session,
-# i.e. the drive thinks a switch is engaged while it is free and vice versa.
-# That is a plausible (NOT yet proven) contributor to a move running past an
-# end -- see BACKLOG.
-#
-# DEFAULT False: stop writing limit-switch configuration the app never meant
-# to write. Nothing motion-related is lost -- HP is not a motion command.
-# Set True to restore the historical behaviour verbatim.
-#
-# HOW TO FIND OUT WHAT THE DRIVE ACTUALLY WANTS (one clean experiment):
-# power-cycle the controller and run read_faulhaber_config.py BEFORE starting
-# the app. The IOC/HP line then shows the EEPROM value. If it is 00000 the
-# app's HP0 was a harmless no-op all along; if it is anything else, the app
-# has been flipping the endstop polarity every session.
-#
-# ===== 2026-07-24: BACK TO True -- THE EXPERIMENT ABOVE HAS BEEN RUN =====
-# Setting this to False stopped the app writing HP0, and the drive then used
-# its own STORED polarity for the first time. The result at the rig: the motor
-# would only travel in ONE direction. Every move the other way ended in
-# "[STOP] Motion interrupted" / "[ERROR] Goto failed after auto-recover",
-# and calibration became impossible.
-#
-# That is exactly what the stored configuration predicts:
+# WHY THIS RIG NEEDS IT SENT (rig-confirmed, not assumed): this rig's stored
+# drive configuration does not match its own wiring --
 #   IOC:  HB = 00101  -> inputs 1 and 3 ARE hard-blocking limit switches
 #         HD = 00101  -> both of them block CLOCKWISE travel
 #   OST:  0x0500      -> both inputs sit at HIGH level in normal operation
-# With a stored HP bit of 1 ("rising edge / HIGH level valid") the drive reads
-# those permanently-HIGH inputs as "both endstops pressed" and blocks clockwise
-# travel forever. Writing HP0 flips the interpretation to "LOW level valid",
-# the inputs read as free, and both directions work.
+# With the drive's STORED HP bit of 1 ("rising edge / HIGH level valid"), the
+# drive reads those permanently-HIGH inputs as "both endstops pressed" and
+# blocks clockwise travel entirely -- confirmed at the rig: with HP0 not
+# sent, the motor only travelled in ONE direction, every move the other way
+# ended in "[STOP] Motion interrupted" / "[ERROR] Goto failed after
+# auto-recover", and calibration was impossible. Writing HP0 flips the
+# interpretation to "LOW level valid", the inputs read as free, and both
+# directions work. So the drive's stored polarity does not match this rig's
+# wiring, and HP0 is silently compensating for it -- sending it is CORRECT
+# here, not an accident; the only actually misleading part was the command's
+# name (HP is limit-switch polarity, not "hold position").
 #
-# So the drive's stored polarity does not match this rig's wiring, and the
-# app's HP0 was silently compensating for it all along. Sending it is
-# therefore CORRECT here, not the accident it looked like -- the misleading
-# part was only ever the name (HP is limit-switch polarity, not "hold
-# position"), which is now documented above.
+# HOW TO CHECK ON A DIFFERENT RIG: power-cycle the controller and run
+# read_faulhaber_config.py BEFORE starting the app. The IOC/HP line then
+# shows the EEPROM value. If it is 00000, sending HP0 is a harmless no-op; if
+# it is anything else and travel is blocked in one direction without it, this
+# rig has the same mismatch.
 #
 # PROPER FIX, when the rig is next accessible: set the polarity on the drive
 # itself and SAVE it, then this flag can go back to False and the limit
@@ -142,13 +127,13 @@ MOTOR_ANSW_MODE = 0
 # matches "AC", and so on. send_cmd() writes these fire-and-forget and returns
 # immediately instead of blocking for a reply that will never arrive.
 #
-# WHY: with MOTOR_ANSW_MODE = 0 every one of these previously burned
-# timeout (1.0 s) + resync probe (~0.2 s) ~= 1.2 s of pure dead waiting, and a
-# single Go To sends about a dozen of them -> ~14 s of delay per move, plus a
-# wall of misleading "[RESYNC] Timed out" lines for behaviour that is entirely
-# correct and expected in silent mode. This is the "No-Reply-Kommandoset in
-# send_cmd" item from BACKLOG P1; the rig log that identified exactly which
-# commands stay silent is what it was waiting for.
+# WHY: with MOTOR_ANSW_MODE = 0, waiting for a reply after any of these would
+# cost a full timeout (1.0 s) + resync probe (~0.2 s) ~= 1.2 s of pure dead
+# waiting, and a single Go To sends about a dozen of them -> ~14 s of delay
+# per move, plus a wall of misleading "[RESYNC] Timed out" lines for
+# behaviour that is entirely correct and expected in silent mode. The exact
+# set below is rig-confirmed: which commands actually stay silent under
+# ANSW0 was verified from a rig log, not assumed.
 #
 # QUERY commands (POS, OST, GAC, GDEC, GSP, GMOD, ...) are deliberately NOT in
 # this set -- they DO answer in silent mode (confirmed on the rig: POS/OST
@@ -204,9 +189,9 @@ POLL_TIMEOUT = 0.25  # s (was 0.10)
 
 # Treat a reply that is NOT CR-terminated as a failed read instead of parsing
 # it. pyserial's read_until() hands back whatever arrived when it times out,
-# without the terminator -- so half of a POS reply used to become a shorter but
-# perfectly parseable (and completely wrong) position. See
-# protocol_faulhaber.send_cmd. Set False to restore the old lenient behaviour.
+# without the terminator -- so without this flag, half of a POS reply would
+# parse as a shorter but perfectly parseable (and completely wrong) position.
+# See protocol_faulhaber.send_cmd. Set False for the lenient behaviour.
 REQUIRE_CR_TERMINATED_REPLY = True
 
 # Longest PAUSE tolerated BETWEEN two bytes of one reply before the reply is
@@ -295,15 +280,15 @@ SUPPRESS_TIMEOUT_MESSAGES = True
 
 # Master switch: apply AC/DEC/SP once per connect (protocol_faulhaber.
 # init_motor(), via configure_ramp()). Values below were read+tested live at
-# the rig via tune_ramp.py (DEC was previously 30000 -- effectively no brake
-# ramp at all, causing the abrupt stop the user reported; AC/SP were already
-# reasonable). Confirmed OK by the user on 2026-07-22.
+# the rig via tune_ramp.py and confirmed to produce a smooth stop instead of
+# an abrupt one; AC/SP were already reasonable at their current values.
 USE_MOTION_RAMP = True
 
 # Acceleration ramp [1/s^2], manual range 0...30000. None = don't send AC.
 RAMP_AC = 50
 # Deceleration ramp [1/s^2], manual range 0...30000. None = don't send DEC.
-# Was 30000 (= max, ~instant stop) before this fix.
+# At the manual's max (30000) the drive brakes almost instantly with no ramp
+# at all; 100 gives a smooth, controlled stop instead.
 RAMP_DEC = 100
 # Maximum speed [rpm], manual range 0...30000. None = don't send SP.
 # Rarely reached on short scan-step moves (ramp-limited long before SP), but
@@ -396,16 +381,16 @@ POS_TOL_STEPS = 90
 # itself accepts as "reached" -- reporting that as a re-anchor would be noise
 # and would bury the signal it exists for.
 #
-# It was previously a hardcoded 1e-4 nm, which sits BELOW the arrival
+# A hardcoded value here (e.g. 1e-4 nm) would risk sitting BELOW the arrival
 # tolerance (90 steps = 2.49e-4 nm): a move settling anywhere between 0.1 pm
-# and 0.25 pm off would have logged a "re-anchor" although it had arrived
-# perfectly legitimately. How often that happens on the rig is unmeasured --
-# in SIM it never fired, because the simulator lands exactly on target, and
-# the drive's own control corridor (GCORRIDOR = 20 steps = 0.055 pm) is
-# narrower than either threshold. Deriving the value here removes the
-# question: the message now means "outside what the app accepts as arrived",
-# whatever the real residual distribution turns out to be, and it follows
-# POS_TOL_STEPS automatically if that is ever retuned.
+# and 0.25 pm off would then log a "re-anchor" although it had arrived
+# perfectly legitimately -- noise, not signal. In SIM this never fires,
+# because the simulator lands exactly on target, and the drive's own control
+# corridor (GCORRIDOR = 20 steps = 0.055 pm) is narrower than either
+# threshold. Deriving the value from POS_TOL_STEPS instead means the message
+# always means "outside what the app accepts as arrived", whatever the real
+# residual distribution turns out to be, and it follows POS_TOL_STEPS
+# automatically if that is ever retuned.
 REANCHOR_LOG_TOL_NM = POS_TOL_STEPS / float(STEPS_PER_NM)
 
 # How many consecutive polls must lie within tolerance before a position
@@ -454,10 +439,9 @@ POS_TOL_STEPS_RESUME = max(POS_TOL_STEPS, int(float(STEPS_PER_NM) * 0.001))  # u
 # (that takes ~10 min on this rig and is impractical for routine use).
 REFERENCE_MOVE_NM = 3.0
 
-# Sign convention of the Reference Run direction. Was -1 ("to the left")
-# before rig verification; confirmed on this rig to need +1 -- flipped
-# accordingly. Trivially reversible: just flip the sign again if a
-# different rig/wiring needs the opposite direction.
+# Sign convention of the Reference Run direction. Rig-confirmed as +1 for
+# this rig's wiring/gear orientation. Trivially reversible: just flip the
+# sign if a different rig/wiring needs the opposite direction.
 REFERENCE_DIRECTION = 1
 
 
@@ -473,7 +457,7 @@ REFERENCE_DIRECTION = 1
 # calibration sweep uses them.
 # He I (D3) at 587.5618 nm -- the reference line used on this rig. Close to
 # the Na-D doublet region the instrument is usually parked at, so the
-# calibration does not require a long traverse. (Was 656.300 = H-alpha.)
+# calibration does not require a long traverse.
 CAL_CENTER_NM_DEFAULT = "587.5618"  # He I D3
 CAL_SPAN_NM_DEFAULT = "2.0"        # nm, sweep is center +/- span
 CAL_STEP_NM_DEFAULT = "0.2"        # nm
@@ -583,35 +567,32 @@ PLOT_PALETTE = [
 # =====================================================================
 # SIMULATOR: mechanical backlash (sim_hardware.FakeFaulhaber)
 # =====================================================================
-# The simulator used to have ZERO backlash -- "M" added the commanded delta to
-# POS exactly, and the fake PMT signal was derived from the APP's own
-# current_nm bookkeeping rather than from any simulated mechanics. Nothing
-# position-related could therefore be reproduced off the rig: running the
-# backlash calibration against SIM returned ~0.002 nm, which was pure centroid
-# noise on the simulated signal (verified: median 0.00199 nm over 200 runs with
-# a true backlash of exactly 0).
-#
 # With this set > 0 the simulator models real slack: on a direction REVERSAL
 # the first SIM_BACKLASH_NM worth of travel turns the motor (and is counted by
 # POS, exactly as a real encoder would) WITHOUT moving the grating. The
 # simulated signal follows the grating, not the encoder -- so backlash
 # compensation, the calibration routine and scan drift all become testable
-# without hardware.
+# without hardware. At 0.0 the simulator has ideal, backlash-free mechanics:
+# "M" adds the commanded delta to POS exactly, and the fake PMT signal is
+# derived from the app's own current_nm bookkeeping rather than from any
+# simulated mechanics, so nothing position-related is reproducible off the
+# rig (e.g. the backlash calibration routine converges on pure centroid
+# noise, ~0.002 nm, instead of a real backlash value).
 #
 # 0.082 nm is the value measured on the rig, which makes SIM behave like the
-# real instrument. Set to 0.0 to get the old ideal-mechanics simulator back.
+# real instrument.
 SIM_BACKLASH_NM = 0.082
 
 # --- Simulator motion timing -------------------------------------------
-# The simulated drive used to execute "M" INSTANTLY: POS jumped straight to
-# the target. Free Run polls position+signal continuously DURING one long
-# move, so in SIM the sweep was already over before the loop could sample it
-# and the plot got exactly ONE point. Stepped scans were unaffected (each
-# step is its own move), which is why this went unnoticed.
+# The simulated drive's "M" must take simulated time to complete, not jump
+# POS straight to the target instantly: Free Run polls position+signal
+# continuously DURING one long move, so an instant move would end the sweep
+# before the polling loop could sample it and the plot would get exactly ONE
+# point. Stepped scans are unaffected by this (each step is its own move).
 #
-# Both figures below are derived from the rig, not invented: the 2026-07-23
-# speed sweep ran identical 5 nm free runs at 1000-10000 rpm and logged the
-# point count at the measured ~19.5 Hz poll rate.
+# Both figures below are derived from the rig, not invented: a speed sweep
+# ran identical 5 nm free runs at 1000-10000 rpm and logged the point count
+# at the measured ~19.5 Hz poll rate.
 #   * Below ~2000 rpm the duration scales linearly at 61 steps/s per rpm.
 #   * Above that the ramp dominates and the sweep never got faster than about
 #     280 000 steps/s (5 nm in ~6.5 s), so the speed is capped there.
@@ -662,10 +643,9 @@ SCAN_EPSILON_NM = 1e-9
 # =====================================================================
 # STATUSWORD (CiA-402, SDO 0x6041) + OST (Faulhaber ASCII) CONSTANTS
 # =====================================================================
-# These used to be scattered FOUR TIMES across the monolith (STATUS_FAULT_BIT/
-# STATUS_TR_BIT with identical values in four places, together with three
-# partially overlapping audit functions). Now consolidated here ONCE,
-# centrally.
+# Consolidated here ONCE, centrally -- the monolith had these scattered FOUR
+# TIMES (STATUS_FAULT_BIT/STATUS_TR_BIT with identical values in four
+# places, together with three partially overlapping audit functions).
 #
 # IMPORTANT: only the CONSTANTS were consolidated (identical values, safe).
 # The three audit FUNCTIONS (postmove_status_audit, postmove_limit_audit,
@@ -709,8 +689,8 @@ OST_DEVIATION_ERROR      = 0x0020   # bit5
 OST_OVERVOLTAGE          = 0x0040   # bit6
 OST_OVERTEMPERATURE      = 0x0080   # bit7
 # --- OST digital input bits: THESE ARE RAW LEVELS, NOT "TRIPPED" FLAGS -----
-# Manual Tab. 8: bits 8/9/10 are "Zustand Eingang 1/2/3" -- the electrical
-# LEVEL of the input, nothing more.
+# Manual Tab. 8: bits 8/9/10 are "Zustand Eingang 1/2/3" (German: "state of
+# input 1/2/3") -- the electrical LEVEL of the input, nothing more.
 #
 # On THIS rig the limit switches are ACTIVE LOW, measured directly (three
 # read_faulhaber_config.py runs while pressing each endstop by hand):
@@ -738,21 +718,20 @@ OST_LIMIT_CONT_CURRENT   = 0x20000  # bit17
 
 # OST masks (used by read_ost/wait/audit)
 OST_ERROR_MASK = (OST_DEVIATION_ERROR | OST_OVERVOLTAGE | OST_OVERTEMPERATURE)
-OST_FAULT_MASK = OST_ERROR_MASK  # alias (previously separate, now resolved)
+OST_FAULT_MASK = OST_ERROR_MASK  # alias, same bits as OST_ERROR_MASK
 OST_INPUT_MASK = (OST_STATUS_INPUT1 | OST_STATUS_INPUT2 | OST_STATUS_INPUT3)
 
 # --- Legacy OST masks, CURRENTLY DISABLED (value 0x0000). Used by
 #     postmove_limit_audit() in an OR; with 0x0000 they contribute nothing.
 #     Not deleted (doc policy), only clearly flagged. ---
 #
-# WARNING -- the old example values in the comments below were INVERTED and
-# have been corrected to a warning instead: "256 = hard limit reached" and
-# "1024 = internal software limit" would be bit8 (Input 1) and bit10
-# (Input 3) SET. Per OST_ENDSTOP_ACTIVE_LOW above, those bits being SET means
-# both endstops are FREE. Entering them here would make postmove_limit_audit()
-# report a limit fault after EVERY normal move -- the rig's normal idle OST is
-# 0x0500, i.e. both bits set (visible in the app's own "[AUDIT] Post-move OST
-# OK: 0x0500" log lines).
+# WARNING: these must NOT be set to bit8 (Input 1, 256) / bit10 (Input 3,
+# 1024) as "SET" values, i.e. NOT "256 = hard limit reached" / "1024 =
+# internal software limit". Per OST_ENDSTOP_ACTIVE_LOW above, those bits
+# being SET means both endstops are FREE, not engaged -- setting them here
+# would make postmove_limit_audit() report a limit fault after EVERY normal
+# move, since the rig's normal idle OST is 0x0500 (both bits set, visible in
+# the app's own "[AUDIT] Post-move OST OK: 0x0500" log lines).
 #
 # A working limit check cannot be expressed as a simple OR-mask at all,
 # because the fault condition here is a bit being CLEAR. It needs an explicit

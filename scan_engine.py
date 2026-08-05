@@ -119,13 +119,12 @@ def _slack_consumed_steps(travelled_steps, comp_steps):
 
     WHY THIS EXISTS: the partial-move re-anchors (interrupted Goto, interrupted
     scan step, interrupted resume step) convert a raw encoder delta into a
-    wavelength. Treating ALL of that delta as optical travel -- what the code
-    did before -- overstates the wavelength change by up to one full slip
-    (~0.09 nm here) whenever the interrupted move happened to be a reversal.
-    The worst case is a Stop very early in such a move: the grating has not
-    moved at all, yet the label would jump by the whole compensation. Slack is
-    consumed FIRST and deterministically, so the split is known, not guessable
-    -- an earlier comment in this file claiming otherwise was wrong.
+    wavelength. Treating ALL of that delta as optical travel overstates the
+    wavelength change by up to one full slip (~0.09 nm here) whenever the
+    interrupted move happened to be a reversal. The worst case is a Stop very
+    early in such a move: the grating has not moved at all, yet the label
+    would jump by the whole compensation. Slack is consumed FIRST and
+    deterministically, so the split is known, not guessable.
 
     RESIDUAL UNCERTAINTY, stated plainly: comp_steps reflects the CONFIGURED
     slip, not the true mechanical backlash. If the slip is miscalibrated this
@@ -273,13 +272,12 @@ def goto_wavelength_action():
     if state["is_scanning"]:
         refs['messagebox'].showwarning("Busy", "Cannot GOTO while scanning.")
         return
-    # BUGFIX (re-entrancy): a GoTo is not covered by is_scanning, so nothing
-    # used to stop a second one from starting on top of a running one -- a
-    # double-click on Go To, or on a Jog button (jog_*_action IS a GoTo,
-    # see CONTEXT.md), spawned two goto_workers driving the same axis from
-    # two different origins. It also made state['is_moving'] unreliable:
-    # whichever worker finished first cleared the flag while the other was
-    # still moving, which is exactly the signal stop_action() now waits on.
+    # Re-entrancy guard: a GoTo is not covered by is_scanning, so without this
+    # check a double-click on Go To, or on a Jog button (jog_*_action IS a
+    # GoTo, see CONTEXT.md), could spawn two goto_workers driving the same
+    # axis from two different origins, and each worker clearing
+    # state['is_moving'] independently would make that flag -- the signal
+    # stop_action() waits on -- unreliable.
     if state.get("is_moving"):
         refs['messagebox'].showwarning("Busy", "A move is already in progress.")
         return
@@ -314,7 +312,7 @@ def goto_wavelength_action():
             # just below and by the interrupted branch further down to
             # recover the TRUE current wavelength after a Stop instead of
             # re-reading the (never updated mid-move) entry_current field.
-            # See the BUGFIX note in the `else:` branch (Defect B).
+            # See the note in the `else:` branch below.
             anchor_steps = current_steps
             anchor_nm = current_nm_ui
             delta_nm = target_nm - current_nm_ui
@@ -323,7 +321,7 @@ def goto_wavelength_action():
             # so the post-move re-anchor below can shift the anchor by
             # EXACTLY this many steps and exclude it from the nm result --
             # same pattern as free_run_worker's nm_anchor_steps = start +
-            # comp_steps (see Defect C note there).
+            # comp_steps (see the note there).
             comp = 0
             if abs(delta_nm) > 0:
                 comp = reversal_compensation_steps(1 if delta_nm >= 0 else -1)
@@ -338,26 +336,24 @@ def goto_wavelength_action():
             if SAFE_AFTER_MOVE:
                 safe_stop()
             if reached:
-                # BUGFIX (Defect C -- see BACKLOG.md/CONTEXT.md P0): re-anchor
-                # to the REAL position instead of blindly trusting
+                # Re-anchor to the REAL position instead of blindly trusting
                 # target_nm, mirroring free_run_worker's post-sweep
                 # re-anchor. The anchor is shifted by `comp` first so the
                 # slack-take-up steps are EXCLUDED from the nm result --
-                # simply reading POS back without that shift would fold
-                # compensation in as if it were optical travel, which is
-                # what free_run_worker's fix (587.000 -> 586.918 nm bug)
-                # already established is wrong. This is deliberately NOT
-                # "add comp to the label": if the configured slip exactly
-                # matches the real backlash, real_nm comes out equal to
-                # target_nm (verified in SIM: sim_defect_probe.py); if the
-                # slip is miscalibrated, this catches the mismatch on every
-                # move instead of letting it accumulate silently.
+                # reading POS back without that shift would fold the
+                # compensation in as if it were optical travel, which is not
+                # what those steps are (see _slack_consumed_steps()). This is
+                # deliberately NOT "add comp to the label": if the configured
+                # slip exactly matches the real backlash, real_nm comes out
+                # equal to target_nm (verified in SIM: sim_defect_probe.py);
+                # if the slip is miscalibrated, this catches the mismatch on
+                # every move instead of letting it accumulate silently.
                 real_nm = _encoder_nm_or_none(anchor_steps, anchor_nm, slack_steps=comp)
                 if real_nm is None:
                     # POS unreadable -- fall back to the commanded target
-                    # (the behaviour before this re-anchor existed) instead
-                    # of writing a fabricated position into the origin every
-                    # later move derives from. See _encoder_nm_or_none().
+                    # instead of writing a fabricated position into the
+                    # origin every later move derives from. See
+                    # _encoder_nm_or_none().
                     log("[WARN] Could not read POS after move; keeping commanded "
                         f"target {target_nm:.3f} nm as the position estimate.", "warn")
                     real_nm = target_nm
@@ -375,19 +371,16 @@ def goto_wavelength_action():
 
             else:
                 log("[STOP] Motion interrupted")
-                # BUGFIX (Stop was not actually stopping -- see BACKLOG.md/
-                # CONTEXT.md P0): capture WHY the move ended, BEFORE
-                # recover_after_stop() below clears state['stop_flag'] as part
-                # of re-arming. wait_until_position() returns False both for a
-                # user Stop and for a timeout/fault, and the auto-recover
-                # retry below cannot tell them apart -- so pressing Stop
-                # during a GoTo used to abort the move and then immediately
-                # drive to the original target anyway. Observed verbatim in
-                # SIM (sim_defect_probe.py): Stop at ~1/3 of an 8 nm move,
-                # followed by "[DONE] Reached 531.000 nm (after auto-recover)"
-                # with the encoder confirming the drive really went the full
-                # distance. Retrying is right after a transient fault; it is
-                # never right after the operator asked for a stop.
+                # Capture WHY the move ended, BEFORE recover_after_stop()
+                # below clears state['stop_flag'] as part of re-arming.
+                # wait_until_position() returns False both for a user Stop
+                # and for a timeout/fault, and the auto-recover retry below
+                # cannot tell them apart on its own -- without capturing this
+                # flag first, a Stop during a GoTo would abort the move and
+                # then immediately drive to the original target anyway
+                # (confirmed reproducible in SIM, sim_defect_probe.py).
+                # Retrying is right after a transient fault; it is never
+                # right after the operator asked for a stop.
                 user_stop = bool(state.get("stop_flag"))
                 if user_stop:
                     # Do NOT re-arm here: stop_action()'s own background worker
@@ -400,50 +393,40 @@ def goto_wavelength_action():
                 else:
                     # Auto-recover once and retry the goto
                     recover_after_stop()
-                    # BUGFIX (fsm lying about an in-flight retry -- found while
-                    # verifying the Stop/GoTo race fix above): recover_after_stop()
-                    # unconditionally sets fsm to IDLE as part of its normal
-                    # re-arm sequence (protocol_faulhaber.py). That's correct
-                    # when IT is what ends a move, but here goto_worker calls it
-                    # mid-retry and then immediately starts a SECOND real move --
-                    # without this line, fsm reported IDLE while the retry was
-                    # still silently in progress (state['is_moving'] stayed True
+                    # recover_after_stop() unconditionally sets fsm to IDLE as
+                    # part of its normal re-arm sequence (protocol_faulhaber.py).
+                    # That's correct when IT is what ends a move, but here
+                    # goto_worker calls it mid-retry and then immediately
+                    # starts a SECOND real move -- without setting fsm back to
+                    # MOVING, fsm would report IDLE while the retry is still
+                    # silently in progress (state['is_moving'] stays True
                     # throughout -- it's only cleared in this worker's own
                     # finally block -- but fsm is the signal both the GUI and
                     # test/probe code actually poll).
                     set_fsm("MOVING")
                     init_motor()
                     current_steps = read_position_or_none()
-                # BUGFIX (Defect B, "desync after Stop" -- see BACKLOG.md/
-                # CONTEXT.md P0): current_nm_ui used to be re-read from
-                # refs['entry_current'], which is NEVER updated while a GoTo
-                # is in flight (only on success, in the `if reached:` branch
-                # above) -- so after an interrupted move it still held the
-                # wavelength from BEFORE this GoTo started. delta_nm was then
-                # computed as the FULL original distance and added onto
-                # current_steps, which WAS freshly read (i.e. already
-                # reflects the partial move) -- so the retry commanded a
-                # relative move sized for the pre-move position and landed
-                # past the target by exactly the distance already travelled
-                # before the Stop. Confirmed reproducible in SIM
-                # (sim_defect_probe.py): a Stop at ~1/3 of an 8 nm move left
-                # the label 2.7 nm stale; the retry then overshot the 505 nm
-                # target and the drive ended up at 528.7 nm.
-                # Fix: derive the TRUE current wavelength from the freshly
-                # read encoder position via the anchor captured at the top of
-                # this worker (anchor_steps/anchor_nm), the same
+                # current_nm_ui must NOT be re-read from refs['entry_current']
+                # here: that field is never updated while a GoTo is in flight
+                # (only on success, in the `if reached:` branch above), so
+                # after an interrupted move it would still hold the
+                # wavelength from BEFORE this GoTo started. Computing delta_nm
+                # from that stale value against the freshly read
+                # current_steps (which DOES reflect the partial move) would
+                # size the retry's relative move for the pre-move position
+                # and overshoot the target by exactly the distance already
+                # travelled before the Stop.
+                # Instead, derive the TRUE current wavelength from the
+                # freshly read encoder position via the anchor captured at
+                # the top of this worker (anchor_steps/anchor_nm) -- the same
                 # anchored-delta pattern free_run_worker and scan_worker's
-                # [DIAG] logging already use elsewhere in this file, instead
-                # of trusting the stale UI field. Also re-anchor the label
-                # immediately (not just on eventual retry success), so it
-                # reflects reality even if the retry itself fails too.
+                # [DIAG] logging use elsewhere in this file. Re-anchor the
+                # label immediately (not just on eventual retry success), so
+                # it reflects reality even if the retry itself fails too.
                 # Comp-adjusted by the part of the compensation that was
                 # actually consumed: slack is taken up first, so an
                 # interrupted reversal has NOT moved the grating by the full
-                # encoder delta (see _slack_consumed_steps()). An earlier
-                # version of this comment claimed the split was unknowable
-                # and subtracted nothing, which overstated the wavelength
-                # change by up to one slip on every interrupted reversal.
+                # encoder delta (see _slack_consumed_steps()).
                 # current_steps is None if the POS read failed -- keep the
                 # label untouched rather than writing a fabricated position
                 # (see _encoder_nm_or_none() for why that matters here).
@@ -497,7 +480,7 @@ def goto_wavelength_action():
                     safe_stop()
                 if reached2:
                     # Same comp-adjusted re-anchor as the first attempt's
-                    # success path (Defect C) -- see the comment there.
+                    # success path -- see the comment there.
                     real_nm = _encoder_nm_or_none(retry_anchor_steps, retry_anchor_nm,
                                                   slack_steps=comp)
                     if real_nm is None:
@@ -526,19 +509,18 @@ def goto_wavelength_action():
             if state.get("fsm") == "MOVING":
                 set_fsm("IDLE")
 
-    # BUGFIX (Stop/GoTo race -- see BACKLOG.md/CONTEXT.md P0): tells
-    # stop_action() a GoTo is in flight, the same way is_scanning tells it a
-    # scan is in flight. See the state['is_moving'] comment in app_context.py
-    # for the race this closes.
+    # Tells stop_action() a GoTo is in flight, the same way is_scanning tells
+    # it a scan is in flight. See the state['is_moving'] comment in
+    # app_context.py for the race this closes.
     # Set HERE, on the GUI thread, immediately before the thread is started --
     # NOT inside goto_worker. Two reasons: (1) the re-entrancy guard at the
     # top of this function then does its check-and-set without a window in
     # between (Qt serialises GUI callbacks on one thread, so no other GoTo can
-    # slip through); (2) setting it inside the worker left a gap of one thread
-    # start-up: a Stop pressed in that gap saw is_moving still False, so
-    # stop_action() skipped its wait and re-armed the drive underneath a GoTo
-    # that was about to begin. Cleared in goto_worker's finally block, which
-    # runs on every exit path.
+    # slip through); (2) setting it inside the worker would leave a gap of one
+    # thread start-up during which a Stop pressed in that gap would see
+    # is_moving still False, so stop_action() would skip its wait and re-arm
+    # the drive underneath a GoTo that was about to begin. Cleared in
+    # goto_worker's finally block, which runs on every exit path.
     state['is_moving'] = True
     threading.Thread(target=goto_worker, daemon=True).start()
 
@@ -615,26 +597,25 @@ def scan_action():
             pos_nm = s_nm
             rel_step_steps = steps_for_delta_nm(st_nm) * direction
 
-            # ABSOLUTE STEP GRID (fixes cumulative scan drift).
-            # Each step used to be commanded relative to the position measured
-            # right before it: target = read_position() + fixed_step. Any
-            # shortfall on one step therefore became the starting point of the
-            # next one and was carried forward FOREVER instead of being
-            # corrected -- a pure relative chain.
-            # It accumulates because wait_until_position() accepts arrival
-            # within POS_TOL_STEPS, and on this rig POS_TOL_STEPS
-            # (0.01 nm = 3617 steps) is exactly ONE 0.01 nm scan step wide, so
-            # a move may legitimately stop a long way short and still count.
-            # Measured on the rig (2026-07-23, 10 identical queued scans):
-            # +22.5 pm drift per scan cycle over 200 steps = ~40 steps lost per
-            # step move (~1.1 %), strictly monotonic. Cross-checked against a
-            # 0.2 nm / 20-step series: +2.7 pm per cycle. Drift scaled with the
-            # NUMBER OF STEPS (~0.11-0.17 pm each), NOT with the number of
-            # reversals (2 per cycle in both) -- which is what rules out
-            # backlash as the cause and points at the relative chain.
-            # Now every target is derived from an anchor taken once at the
-            # scan start, so a shortfall on one step is simply corrected by the
-            # next move. Backlash compensation is accumulated separately
+            # ABSOLUTE STEP GRID: every target below is derived from a single
+            # anchor position taken once at the scan start (grid_anchor_steps),
+            # not from wherever the previous move happened to stop. This
+            # matters because wait_until_position() accepts arrival within
+            # POS_TOL_STEPS, and on this rig POS_TOL_STEPS (0.01 nm = 3617
+            # steps) is exactly ONE 0.01 nm scan step wide -- a move may
+            # legitimately stop a long way short and still count as arrived.
+            # A pure relative chain (each step commanded from the position
+            # measured right before it) would carry that shortfall forward
+            # into every subsequent step instead of correcting it, producing
+            # a cumulative drift that grows with step count rather than with
+            # the number of reversals -- rig measurements: +22.5 pm/cycle over
+            # 200 steps (~1.1 %) and +2.7 pm/cycle over a 20-step series, both
+            # strictly monotonic and scaling with step count rather than the
+            # (constant, 2-per-cycle) number of reversals, which rules out
+            # backlash as the cause. Deriving every target from a fixed
+            # anchor means a shortfall on one step is simply corrected by the
+            # next move instead of accumulating.
+            # Backlash compensation is accumulated separately
             # (grid_slack_steps): those steps do turn the motor and DO show up
             # in POS, but they take up slack instead of moving the grating, so
             # they shift the grid without being wavelength travel.
@@ -663,18 +644,17 @@ def scan_action():
                     safe_stop(); log("[STOP] Scan aborted"); break
 
                 # Measure ONE averaged point at the current wavelength.
-                # (Pre-settle + averaging + residual dwell all happen inside
-                #  acquire_measurement; this is the fix for AVG being ignored
-                #  on a fresh scan -- see BACKLOG/HANDOVER.)
+                # Pre-settle + averaging + residual dwell all happen inside
+                # acquire_measurement(), which is the single source of truth
+                # for how AVG/dwell settings apply to a point.
                 v = acquire_measurement(dwell)
                 if state.get('active_plot_id'):
                     _plot().append_scan_point(state['active_plot_id'], pos_nm, v)
-                # [DIAG] POS is read HERE now instead of just before the move
-                # further down. Same value (nothing moves between the two
-                # points) and the same number of serial round-trips -- the read
-                # was simply moved up and is reused below, so this costs
-                # nothing. It lets the wavelength LABEL and the ENCODER be
-                # logged together for the point that was actually measured.
+                # [DIAG] POS read here, ahead of the move further down, and
+                # reused below -- same value (nothing moves between the two
+                # points) and the same number of serial round-trips, so this
+                # costs nothing. It lets the wavelength LABEL and the ENCODER
+                # be logged together for the point that was actually measured.
                 # POS is a free-running absolute counter (init_motor and
                 # recover_after_stop never home the drive), so pos= is directly
                 # comparable ACROSS scans in one session -- that is what makes
@@ -695,12 +675,13 @@ def scan_action():
                     pass
 
                 # Next step
-                # Stop checkpoint BEFORE issuing the move. acquire_measurement()
-                # above honours stop_flag and can return early, but the loop
-                # used to fall straight through into LR/M anyway -- i.e. Stop
-                # was followed by the drive being told to make ANOTHER step,
-                # which wait_until_position() then aborted. Net effect: a small
-                # unintended move after every Stop pressed during a dwell.
+                # Stop checkpoint BEFORE issuing the move: acquire_measurement()
+                # above honours stop_flag and can return early, but without
+                # this check the loop would fall straight through into LR/M
+                # anyway -- commanding the drive to make ANOTHER step right
+                # after a Stop, which wait_until_position() would then abort,
+                # producing a small unintended move after every Stop pressed
+                # during a dwell.
                 if state["stop_flag"]:
                     safe_stop(); log("[STOP] Scan aborted"); break
                 pos_nm_next = pos_nm + st_nm*direction
@@ -734,29 +715,22 @@ def scan_action():
 
                 if not wait_until_position(target_abs, timeout=timeout_for_target_steps(target_abs, st_nm)):
                     safe_stop(); log("[STOP] Scan interrupted")
-                    # BUGFIX (Defect A -- see BACKLOG.md/CONTEXT.md P0):
-                    # re-anchor the label to the REAL position instead of
+                    # Re-anchor the label to the REAL position instead of
                     # leaving pos_nm/state['current_nm'] frozen at the last
                     # successfully COMPLETED step while the drive coasted
                     # somewhere else during the DEC ramp. Mirrors
                     # free_run_worker's post-sweep re-anchor ("Re-anchor to
-                    # the REAL position after the sweep, however it ended")
-                    # -- that fix was only ever applied to the free-run path,
-                    # never to the stepped-scan path. grid_anchor_steps/s_nm
-                    # is the SAME anchor pair the [DIAG] logging above already
-                    # uses for enc_nm, so this is the identical conversion,
-                    # just applied on the abort path too. Confirmed
-                    # reproducible in SIM (sim_defect_probe.py): a Stop
-                    # mid-step left the label measurably off the true
-                    # (encoder-frame) position, uncorrected.
+                    # the REAL position after the sweep, however it ended").
+                    # grid_anchor_steps/s_nm is the SAME anchor pair the
+                    # [DIAG] logging above already uses for enc_nm, so this is
+                    # the identical conversion, applied here on the abort
+                    # path.
                     # Excludes grid_slack_steps_before (all reversals CONFIRMED
                     # complete before this step) plus however much of THIS
                     # step's own `comp` the partial travel actually consumed --
                     # slack is taken up first, so an interrupted reversal has
                     # not moved the grating by the full encoder delta (see
-                    # _slack_consumed_steps(); the previous version subtracted
-                    # nothing for this step and thus overstated the change by
-                    # up to one slip).
+                    # _slack_consumed_steps()).
                     try:
                         _pos_now = read_position_or_none()
                         if _pos_now is None:
@@ -791,8 +765,7 @@ def scan_action():
                 # below. Reached target_abs == pos_nm_next is now a fact; if
                 # the audit then halts the scan on a fault/limit, the label
                 # must already reflect the step that WAS completed, not the
-                # previous one -- same class of bug as the abort case just
-                # above, just one check later.
+                # previous one.
                 pos_nm = pos_nm_next
                 state["current_nm"] = pos_nm
                 state['planned_params']['last_nm'] = pos_nm
@@ -831,22 +804,20 @@ def scan_action():
                 # of the `break`s above -- so this never re-does or conflicts
                 # with the interrupted-step re-anchor further up.
                 #
-                # BUGFIX (Defect C -- see BACKLOG.md/CONTEXT.md P0): verify
-                # the label against the real (encoder-frame) position once
-                # the scan finishes normally, mirroring free_run_worker's
+                # Verify the label against the real (encoder-frame) position
+                # once the scan finishes normally, mirroring free_run_worker's
                 # post-sweep re-anchor. Every reversal in this scan is now
                 # CONFIRMED complete, so grid_slack_steps can be fully
                 # excluded here (unlike the partial-move re-anchor above,
                 # which only excludes CONFIRMED prior slack via
                 # grid_slack_steps_before -- see the NOTE there). This is
                 # what catches a slip-nm miscalibration or backlash-model
-                # mismatch before it carries silently into the next
-                # scan/goto -- the "whole scan shifts by up to 1 slip"
-                # failure mode Defect C describes. Verified in SIM
-                # (sim_defect_probe.py): with a correctly matched slip value
-                # this converges to the pure step-arithmetic pos_nm already
-                # in use; with a mismatch it corrects it instead of letting
-                # it silently accumulate.
+                # mismatch -- a whole scan silently shifting by up to one
+                # slip -- before it carries into the next scan/goto: with a
+                # correctly matched slip value this converges to the pure
+                # step-arithmetic pos_nm already in use (verified in SIM,
+                # sim_defect_probe.py); with a mismatch it corrects it instead
+                # of letting it silently accumulate.
                 try:
                     real_nm = _encoder_nm_or_none(grid_anchor_steps, s_nm,
                                                   slack_steps=grid_slack_steps)
@@ -869,17 +840,18 @@ def scan_action():
 
             state["is_scanning"] = False
             refs['btn_pause'].configure(state="disabled"); refs['btn_resume'].configure(state="disabled")
-            # FIX: scan_worker previously never called this on normal completion
-            # (unlike do_resume, which always does). Without it, Goto/Scan/Jog/
-            # Queue stayed locked after a scan finished on its own -- only
-            # pressing Stop unlocked them, because stop_action() happens to call
-            # recover_after_stop(), which calls this same hook as a side effect.
+            # Without this call, Goto/Scan/Jog/Queue stay locked after a scan
+            # finishes on its own -- only pressing Stop unlocks them, because
+            # stop_action() happens to call recover_after_stop(), which calls
+            # this same hook as a side effect. do_resume always calls this on
+            # its own completion path; scan_worker must too.
             ui_hook('set_buttons_scanning', False)
-            # Say what actually happened. The loop is left by `break` on Stop
-            # as well as on normal completion, so this used to print
-            # "[DONE] Scan complete." directly after "[STOP] Scan aborted" --
-            # two contradictory lines about the same scan. The CSV status was
-            # already correct ("interrupted"); only the log lied.
+            # The loop is left by `break` on Stop as well as on normal
+            # completion, so the log message must distinguish the two --
+            # otherwise "[DONE] Scan complete." would print directly after
+            # "[STOP] Scan aborted", two contradictory lines about the same
+            # scan. The CSV status already distinguishes them ("interrupted");
+            # the log must match.
             _was_stopped = bool(state.get("stop_flag"))
             if _was_stopped:
                 log("[DONE] Scan stopped early -- partial data kept and saved.")
@@ -903,7 +875,7 @@ def scan_action():
         except Exception as e:
             state["is_scanning"] = False
             refs['btn_pause'].configure(state="disabled"); refs['btn_resume'].configure(state="disabled")
-            ui_hook('set_buttons_scanning', False)  # same fix as above, error path
+            ui_hook('set_buttons_scanning', False)  # unlock controls on the error path too, same as normal completion above
             log(f"[ERROR] scan: {e}", "error")
             try:
                 if state.get('active_plot_id'):
@@ -1005,16 +977,15 @@ def free_run_scan_action():
             # driven (hence added to the commanded move) but must NOT count as
             # wavelength change.
             #
-            # BUG THIS FIXES (rig log 2026-07-23, three identical sweeps):
-            # target 587.000 nm, re-anchored to 586.918 nm every single time --
-            # off by 0.082 nm, which is EXACTLY the logged slip compensation.
-            # The nm axis was computed as (pos - start_steps_abs), i.e. it
-            # counted the compensation as real wavelength travel, so the sweep
-            # ran the full distance PLUS the compensation and then labelled the
-            # end point 0.082 nm short. The stepped scan does not have this
-            # problem because it tracks pos_nm arithmetically, which is why
-            # free run and stepped scan of the same line came out offset
-            # against each other by exactly one compensation.
+            # The nm axis must be computed relative to nm_anchor_steps
+            # (post-slack), NOT (pos - start_steps_abs): the latter counts the
+            # compensation steps as real wavelength travel, so the sweep runs
+            # the full distance PLUS the compensation and the end point comes
+            # out short by exactly the compensation (0.082 nm on this rig).
+            # The stepped scan does not have this problem because it tracks
+            # pos_nm arithmetically instead of from raw POS -- which is why a
+            # free run and a stepped scan of the same line would otherwise
+            # disagree by exactly one compensation.
             comp_steps = reversal_compensation_steps(direction)
             rel_sweep = steps_for_delta_nm(delta_sweep) + comp_steps
             target_steps = start_steps_abs + rel_sweep
@@ -1038,35 +1009,30 @@ def free_run_scan_action():
             # genuinely takes proportionally longer, so the same budget can
             # run out before the sweep physically gets there.
             #
-            # CONFIRMED at the rig (2026-07-23): a 5 nm sweep at SP=500 rpm
-            # (RAMP_SP/20) stopped at 388.798 nm -- 3.8 of 5 nm, no
-            # "[FREE RUN] Reached/passed target" line, no STOP -- after 857
-            # points (~44 s at the measured ~19.5 Hz poll rate), matching the
-            # unscaled 55 s budget (10.0 s/nm * 5 nm + 5 s overhead) far too
-            # closely to be coincidence. Every OTHER speed in the same
-            # session (1000-10000 rpm) reached its target normally with the
-            # same unscaled budget -- because at those speeds the move
-            # actually finishes well inside it. Only the slowest override
-            # exposed the missing scaling.
-            #
-            # Fix: if this sweep is slower than RAMP_SP, stretch the budget by
-            # the same ratio the drive itself is slowed down by. Capped by
-            # MAX_MOVE_TIMEOUT so a very slow override still can't hang the
-            # UI forever if something else is genuinely wrong.
+            # timeout_for_target_steps() budgets purely on distance and does
+            # not know about a slowed-down sp_rpm; at RAMP_SP that budget has
+            # margin, but a sweep running at a fraction of RAMP_SP genuinely
+            # takes proportionally longer and can exceed the unscaled budget
+            # before it physically arrives (rig-confirmed: a 5 nm sweep at
+            # SP=500 rpm = RAMP_SP/20 timed out at 3.8 of 5 nm against a
+            # ~55 s unscaled budget, while every other tested speed
+            # (1000-10000 rpm) finished normally within it).
+            # If this sweep is slower than RAMP_SP, stretch the budget by the
+            # same ratio the drive itself is slowed down by. Capped by
+            # MAX_MOVE_TIMEOUT so a very slow override still can't hang the UI
+            # forever if something else is genuinely wrong.
             if sp_rpm and sp_rpm < RAMP_SP:
                 speed_ratio = RAMP_SP / float(sp_rpm)
                 timeout_s = min(MAX_MOVE_TIMEOUT, timeout_s * speed_ratio)
 
             # Same short legend format as the stepped scan (see there), with
-            # SECONDS. The old label used '%Y-%m-%d %H:%M' -- no seconds -- so
-            # two free runs started in the same minute produced byte-identical
-            # legend entries and could not be told apart. Free runs are quick
-            # and typically fired back to back, which is exactly when that
-            # happens: the three sweeps in the 2026-07-23 rig log ran at
-            # 16:20:50, 16:21:03 and 16:21:12, i.e. two of them would have
-            # collided. Step/averaging are omitted because a free run has
-            # neither; the sweep speed is shown instead, since that is the one
-            # setting that distinguishes two otherwise identical free runs.
+            # SECONDS: free runs are quick and typically fired back to back
+            # (often within the same minute), so a timestamp without seconds
+            # would produce byte-identical legend entries for two different
+            # sweeps and make them indistinguishable. Step/averaging are
+            # omitted because a free run has neither; the sweep speed is shown
+            # instead, since that is the one setting that distinguishes two
+            # otherwise identical free runs.
             label = (f"{time.strftime('%H:%M:%S')} "
                      f"{s_nm:g}\u2192{e_nm:g} free {sp_rpm:g}rpm")
             state['active_plot_id'] = _plot().start_new_scan(
@@ -1081,13 +1047,10 @@ def free_run_scan_action():
                 log(f"[FREE RUN] Speed override: SP={sp_rpm} rpm for this sweep "
                     f"(normal RAMP_SP={RAMP_SP}, restored after).")
             else:
-                # Log the speed even when it is NOT an override. Previously
-                # this line only appeared for overrides, so a sweep running at
-                # full RAMP_SP was silent about it -- in the 2026-07-23 rig log
-                # that made two consecutive sweeps look identical while the
-                # second actually ran 10x faster (and produced all the POS
-                # fragments). The speed a sweep ran at must always be in the
-                # log, or the log cannot be compared against another run.
+                # Log the speed even when it is NOT an override: the speed a
+                # sweep ran at must always be in the log, or two runs logged
+                # without it are indistinguishable even though one may have
+                # run at a very different rate.
                 log(f"[FREE RUN] Speed: SP={sp_rpm} rpm (no override, this is "
                     f"the configured RAMP_SP).")
 
@@ -1178,16 +1141,15 @@ def free_run_scan_action():
                 state["current_nm"] = nm_now
                 refs['entry_current'].delete(0, "end"); refs['entry_current'].insert(0, f"{nm_now:.3f}")
 
-                # HARD target-overshoot guard. The only "done" test used to be
-                # position-standing-still-AND-near-target below; that never
-                # fires if the motor RUNS PAST the target (e.g. the move
-                # command travelled further than intended, or the drive was in
-                # a bad state) -- the loop then keeps polling and plotting far
-                # beyond End, exactly the 305->586 nm / 867-point runaway seen
-                # at the rig. Stop the instant the real position reaches or
-                # passes target_steps in the direction of travel, regardless of
-                # whether it has settled. `direction` is +1/-1 in commanded-
-                # step space (already includes INVERT_DIRECTION via
+                # HARD target-overshoot guard. The "standing still AND
+                # near-target" test below never fires if the motor RUNS PAST
+                # the target (e.g. the move command travelled further than
+                # intended, or the drive was in a bad state) -- without this
+                # guard the loop would keep polling and plotting far beyond
+                # End. Stop the instant the real position reaches or passes
+                # target_steps in the direction of travel, regardless of
+                # whether it has settled. `direction_steps` is +1/-1 in
+                # commanded-step space (already includes INVERT_DIRECTION via
                 # steps_for_delta_nm that built rel_sweep), so compare in that
                 # same step space.
                 reached_target = ((direction_steps > 0 and pos_steps >= target_steps - POS_TOL_STEPS) or
@@ -1235,8 +1197,8 @@ def free_run_scan_action():
                 if final_pos is not None:
                     # Same anchor as the live nm axis above -- measuring from
                     # start_steps_abs here would re-introduce the compensation
-                    # offset (this is the line that produced the logged
-                    # "587.000 -> 586.918 nm" every sweep).
+                    # offset into the final position, same failure mode as the
+                    # live axis above.
                     real_nm = s_nm + steps_to_delta_nm(final_pos - nm_anchor_steps)
                     if abs(real_nm - float(state.get('current_nm', real_nm))) > 1e-6:
                         log(f"[FREE RUN] Re-anchoring to real position: "
@@ -1343,7 +1305,8 @@ def do_resume():
         pos_nm = float((p.get('last_nm') if p.get('last_nm') is not None else state.get('current_nm', s_nm)))
         tgt_abs = state.get("current_step_target_abs", None)
         if ser_ok() and tgt_abs is not None:
-            # PATCH: Do NOT finish pending target on resume; clear it to avoid pre-move.
+            # Do NOT finish a pending target on resume; clear it to avoid an
+            # unwanted pre-move before the resume loop's own first step.
             state["current_step_target_abs"] = None
             log("[RESUME] Ignoring pending target; continuing from current position.", "warn")
             try:
@@ -1351,10 +1314,10 @@ def do_resume():
                 refs['entry_current'].delete(0, "end"); refs['entry_current'].insert(0, f"{pos_nm:.3f}")
             except Exception:
                 pass
-        # Epsilon unified with scan_worker: use SCAN_EPSILON_NM (device_constants)
-        # instead of a hardcoded 1e-12 here. Both are float-rounding guards only
-        # (nm-scale, far below step resolution), so the change is behaviourally
-        # inert -- it just removes the do_resume/scan_worker inconsistency.
+        # Uses SCAN_EPSILON_NM (device_constants), the same float-rounding
+        # guard scan_worker uses for its loop condition -- both are nm-scale,
+        # far below step resolution, so do_resume and scan_worker must agree
+        # on the same tolerance.
         if direction > 0 and pos_nm < s_nm - SCAN_EPSILON_NM: pos_nm = s_nm
         if direction < 0 and pos_nm > s_nm + SCAN_EPSILON_NM: pos_nm = s_nm
 
@@ -1406,15 +1369,14 @@ def do_resume():
             reached = wait_until_position(target_abs, timeout=timeout_for_target_steps(target_abs, abs(st_nm)))
             if not reached:
                 safe_stop(); log("[STOP] Resume interrupted", "warn")
-                # BUGFIX (same class as Defect A in scan_worker -- see
-                # BACKLOG.md/CONTEXT.md P0): re-anchor pos_nm/current_nm to
-                # the REAL position instead of leaving them at the last
-                # successfully completed step. do_resume reads curr_abs fresh
-                # every iteration (no fixed grid_anchor_steps like
-                # scan_worker's absolute grid), so the anchor for this
-                # conversion is simply THIS iteration's pre-move position
-                # (curr_abs, already read above), paired with pos_nm (the
-                # label before this failed step).
+                # Re-anchor pos_nm/current_nm to the REAL position instead of
+                # leaving them at the last successfully completed step (same
+                # rationale as scan_worker's interrupted-step re-anchor).
+                # do_resume reads curr_abs fresh every iteration (no fixed
+                # grid_anchor_steps like scan_worker's absolute grid), so the
+                # anchor for this conversion is simply THIS iteration's
+                # pre-move position (curr_abs, already read above), paired
+                # with pos_nm (the label before this failed step).
                 try:
                     # Same slack-first correction as scan_worker's interrupted
                     # step (see _slack_consumed_steps()); comp is normally 0
@@ -1487,49 +1449,36 @@ def do_resume():
 def stop_action():
     """Request an abort of whatever is running, from the GUI thread.
 
-    THE RACE THIS FIXES (reported symptom: "Stop does nothing, you have to
-    press it several times"):
-    This used to run entirely on the GUI thread and finished by calling
-    recover_after_stop() -- which sets state['stop_flag'] = False to re-arm
-    the drive for the next command. But the scan worker is a SEPARATE thread
-    that was still running its loop at that moment. So stop_flag was only
-    True for the duration of safe_stop() in between; if the worker did not
-    happen to look at the flag inside that window, it never saw the request
-    at all and simply carried on scanning. Pressing Stop repeatedly
-    eventually hit the window by luck -- hence "sometimes it works".
+    THE RACE THIS PREVENTS: stop_flag is set here and NEVER cleared in this
+    function. Re-arming (recover_after_stop(), which clears stop_flag) is
+    deferred to a background thread that first waits for the running worker
+    to actually leave its loop (is_scanning / is_moving going False). If
+    stop_flag were cleared immediately -- e.g. by running recover_after_stop()
+    synchronously on the GUI thread right after safe_stop() -- there would be
+    only a brief window (bounded by however long safe_stop() takes) during
+    which the worker thread could observe the flag; a worker whose sleep loop
+    happens to check stop_flag outside that window would simply carry on
+    running, unaware Stop was ever pressed. safe_stop()'s ST/V0 are
+    fire-and-forget (no acknowledgment wait in silent answer mode), so that
+    window is only ~20 ms -- SHORTER than the 50 ms PAUSE_POLL_S granularity
+    at which the worker's sleep loops check the flag -- making the race easy
+    to hit rather than a rare fluke.
 
-    The window used to be ~2.4 s, because safe_stop()'s ST and V0 each waited
-    out a full serial timeout for an acknowledgment that never comes in
-    silent answer mode. Making those commands fire-and-forget (correct, and a
-    large speedup elsewhere) shrank the window to ~20 ms -- SHORTER than the
-    50 ms PAUSE_POLL_S granularity at which the worker's sleep loops check
-    the flag. So the pre-existing race went from "rarely bites" to "usually
-    bites". Same bug, just finally visible.
+    Doing the serial work (safe_stop/recover_after_stop) off the GUI thread
+    also keeps the Stop button responsive: both take the shared serial lock,
+    which the scan worker holds for stretches at a time, so running them
+    synchronously on the GUI thread would block the whole UI while a worker
+    holds the lock.
 
-    Now: stop_flag is set and NEVER cleared here. Re-arming is deferred to a
-    background thread that first waits for the worker to actually leave its
-    loop (is_scanning going False), so recover_after_stop() can no longer
-    pull the flag out from under a worker that hasn't noticed it yet.
-
-    Doing the serial work off the GUI thread also keeps the button responsive:
-    safe_stop()/recover_after_stop() take the shared serial lock, which the
-    scan worker holds for stretches at a time -- blocking on it from the GUI
-    thread froze the whole UI, which is the other half of why Stop "did
-    nothing".
-
-    BUGFIX, second race (Stop during a GoTo -- see BACKLOG.md/CONTEXT.md P0):
-    the wait above originally only covered is_scanning, which scan_worker/
-    free_run_worker/do_resume set but goto_worker never did. So a Stop
-    pressed during a GoTo skipped the wait entirely and called
-    recover_after_stop() (which clears stop_flag) almost immediately --
-    often BEFORE goto_worker's own wait_until_position() polling loop had
-    even checked the flag once. goto_worker then just sat there polling for
-    its full move timeout (up to MAX_MOVE_TIMEOUT = 900 s) instead of
-    aborting promptly; Stop LOOKED like it worked ("[OK] Recovered after
-    STOP; ready." logs immediately) while the GoTo kept running underneath.
-    Confirmed via a live thread-stack dump in SIM (sim_defect_probe.py).
-    Fixed by also waiting on state['is_moving'] (see app_context.py), which
-    goto_worker now sets/clears the same way is_scanning brackets a scan."""
+    The wait covers BOTH state['is_scanning'] (set by scan_worker/
+    free_run_worker/do_resume) AND state['is_moving'] (set by goto_worker,
+    see app_context.py) -- a GoTo is not a scan, so without also waiting on
+    is_moving, a Stop pressed during a GoTo would skip the wait, re-arm the
+    drive immediately, and appear to have worked ("[OK] Recovered after
+    STOP; ready." logs right away) while goto_worker's own
+    wait_until_position() polling loop kept running underneath, unaware
+    stop_flag had already been cleared, until its full move timeout (up to
+    MAX_MOVE_TIMEOUT = 900 s) elapsed."""
     # 1) Signal the abort IMMEDIATELY and leave the flag set. Everything that
     #    could clear it again happens later, after the worker has exited.
     state["stop_flag"] = True
@@ -1628,12 +1577,13 @@ def mark_point_action():
 def _capture_scan_settings():
     """Snapshot ALL per-scan acquisition settings from the input fields.
 
-    WHY THIS EXISTS: a queue entry used to store only start/end/step. Timebase,
-    pre-settle and every averaging setting were read LIVE from the fields at
-    the moment each queued scan ran -- so a queue could not hold different
-    acquisition settings per entry, the queue list had nothing to show, and
-    whatever happened to be in the fields when the queue was started silently
-    applied to every entry in it. Now each entry carries its own snapshot.
+    WHY THIS EXISTS: a queue entry must be able to hold acquisition settings
+    (timebase, pre-settle, averaging) that differ from what is currently in
+    the fields, and the queue list must be able to show them per entry.
+    Reading these settings LIVE from the fields at the moment each queued
+    scan runs would mean every entry in the queue silently uses whatever
+    happens to be in the fields at that moment, rather than what was intended
+    for that entry -- so each entry carries its own snapshot instead.
 
     Returns None (after showing an error) if start/end/step are unusable;
     the acquisition fields fall back to safe defaults individually rather than
@@ -1649,10 +1599,10 @@ def _capture_scan_settings():
     # NOTE ON UNITS/SOURCES: read through ui_get(), not refs[].
     #  * refs['entry_wait'] is an _EntryAdapterMsToSec -- it returns SECONDS,
     #    while the field (and everything shown to the user) is in ms. Reading
-    #    it here produced "0.1ms tb" for a field containing 100.
+    #    it via refs[] here would show "0.1ms tb" for a field containing 100.
     #  * 'entry_presettle' and 'avg_fraction_var' are not in refs at all (only
-    #    registered as vars), so refs[...] silently fell through to defaults
-    #    and pre-settle was always captured as 0.
+    #    registered as vars), so refs[...] would silently fall through to
+    #    defaults and capture pre-settle as 0 regardless of the field.
     # ui_get() is the registered-var path and returns the raw field strings.
     def _f(var_name, default):
         try:
@@ -1692,9 +1642,9 @@ def _queue_item_label(item, idx):
     """One-line queue display INCLUDING the acquisition settings.
 
     The averaging settings are what actually determine the noise floor of a
-    queued measurement, so they belong in the list -- previously the entry
-    showed only the wavelength range and there was no way to tell two
-    otherwise-identical entries apart."""
+    queued measurement, so they belong in the list -- without them, two
+    entries with the same wavelength range but different averaging would be
+    indistinguishable in the queue display."""
     base = (f"{idx:02d}: {_fmt_nm(item['start'])} → {_fmt_nm(item['end'])}, "
             f"Δ {_fmt_nm(item['step'])} nm")
     tb = item.get('timebase_ms', 0.0)
@@ -1769,8 +1719,8 @@ def remove_selected_scan():
         except Exception:
             pass
         # Rebuild from the data instead of re-splitting the displayed strings:
-        # the label now contains ':' inside the settings part, so the old
-        # split(":", 1) renumbering would have mangled it.
+        # the label contains ':' inside the settings part, so parsing it back
+        # out with something like split(":", 1) would mangle the renumbering.
         _refresh_queue_listbox()
         log("[QUEUE] Removed selected scan.")
     except Exception as e:
@@ -1788,12 +1738,12 @@ def _fmt_nm(v):
     """Format a wavelength/step for display and for writing back into an entry
     field, WITHOUT silently destroying precision.
 
-    A fixed "%.3f" turned a 0.0001 nm step into "0.000": the scan queue showed
-    "Delta 0.000 nm", and -- far worse -- run_scan_queue_worker() writes these
-    strings BACK into the Step field before running each queued scan, so the
-    queued scan would have been executed with a step of literally zero. Uses as
-    many decimals as the value actually needs, up to 6, and never fewer than 3
-    so ordinary values still read as "589.000"."""
+    A fixed "%.3f" would turn a 0.0001 nm step into "0.000" in the scan queue
+    display -- and, far worse, run_scan_queue_worker() writes these strings
+    BACK into the Step field before running each queued scan, so the queued
+    scan would then execute with a step of literally zero. Uses as many
+    decimals as the value actually needs, up to 6, and never fewer than 3 so
+    ordinary values still read as "589.000"."""
     try:
         v = float(v)
     except Exception:

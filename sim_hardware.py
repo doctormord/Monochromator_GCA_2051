@@ -71,9 +71,10 @@ class FakeFaulhaber:
         # once the slack in the drive train has been taken up, so after a
         # direction reversal the first _backlash_steps of travel move the
         # encoder but not the optics. _optical_pos is therefore what the
-        # simulated PMT signal must be derived from -- deriving it from the
-        # app's own current_nm (the old behaviour) made backlash structurally
-        # invisible in SIM.
+        # simulated PMT signal must be derived from: deriving it from the
+        # app's own current_nm instead would make backlash structurally
+        # invisible in SIM, since the app's tracked wavelength has no notion
+        # of mechanical slack.
         self._backlash_steps = int(round(abs(SIM_BACKLASH_NM) * STEPS_PER_NM))
         self._optical_pos = int(start_steps)
         self._last_dir = 0                # +1 / -1 / 0 = unknown
@@ -130,13 +131,11 @@ class FakeFaulhaber:
             # Do not treat a binary SDO frame ('S'...'E') as ASCII -- but do
             # not throw away every command that merely STARTS with 'S'.
             #
-            # This used to be `if self._tx[:1] == b"S"`, which silently
-            # discarded the ASCII commands "SP<n>" (speed) and "ST" (stop),
-            # because both begin with S. Consequences in SIM: a Free Run speed
-            # override had no effect at all -- sweeps took the same time at
-            # 2000 rpm as at 10000 -- and Stop did not stop the simulated
-            # drive. Neither was visible before, because the simulator used to
-            # execute moves instantly, so speed and stopping were meaningless.
+            # A naive `if self._tx[:1] == b"S"` check would silently discard
+            # the ASCII commands "SP<n>" (speed) and "ST" (stop), since both
+            # begin with S: a Free Run speed override would have no effect at
+            # all (sweeps taking the same time at 2000 rpm as at 10000), and
+            # Stop would not stop the simulated drive.
             #
             # An SDO frame is BINARY; an ASCII command is printable. Deciding
             # on that rather than on the first letter keeps real SDO frames out
@@ -222,13 +221,13 @@ class FakeFaulhaber:
         4.2: every reply is CR followed by LF). Unknown commands are simply
         acknowledged.
 
-        WHY THE LF MATTERS FOR SIM FIDELITY: without it, SIM could never have
-        caught the "every command pays a bogus late-reply drain" bug found at
-        the rig via idle_poll_test.py (protocol_faulhaber._consume_trailing_lf)
-        -- there would have been no LF for the fix to consume, and no LF left
-        behind for the old code to (mis)trigger on either. Sending it here
-        keeps SIM able to catch this class of protocol-shape bug in the
-        future instead of only ever seeing it at the rig."""
+        WHY THE LF MATTERS FOR SIM FIDELITY: without it, SIM cannot reproduce
+        protocol-shape bugs like the "every command pays a bogus late-reply
+        drain" case that idle_poll_test.py found at the rig
+        (protocol_faulhaber._consume_trailing_lf expects and consumes exactly
+        this trailing LF). Sending it here keeps SIM able to catch this class
+        of protocol-shape bug directly, instead of only ever surfacing it at
+        the rig."""
         if not cmd:
             return b"" if MOTOR_ANSW_MODE == 0 else b"\r\n"
         up = cmd.upper()
@@ -276,11 +275,12 @@ class FakeFaulhaber:
         # EN, HP0, V0, ST, HP and anything else.
         # In silent answer mode (MOTOR_ANSW_MODE == 0, which is what the rig's
         # drive is actually set to -- confirmed via CST) the drive does NOT
-        # acknowledge set commands at all. Emitting a bare CR here made the
-        # simulator UNfaithful: those stray acks piled up in the RX buffer
-        # (send_cmd no longer reads a reply for fire-and-forget commands) and
-        # were then returned as the answer to the next POS query, which showed
-        # up as spurious RESYNC timeouts in SIM only.
+        # acknowledge set commands at all. Emitting a bare CR here instead
+        # would make the simulator UNfaithful: send_cmd() never reads a reply
+        # for these fire-and-forget commands, so the stray ack would pile up
+        # in the RX buffer and get returned as the answer to the NEXT POS
+        # query instead -- producing spurious RESYNC timeouts that only ever
+        # occur in SIM, not on the rig.
         if MOTOR_ANSW_MODE == 0:
             return b""
         return b"\r\n"

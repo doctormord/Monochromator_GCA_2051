@@ -10,7 +10,7 @@ instead of guesses:
 
   1. Is POS a genuine (encoder/Hall) position readback, or something else?
      -> GTYP, GMOD/CST (FAULHABER mode), GENCRES (encoder resolution)
-  2. Are hardware limit switches (Endschalter) wired and configured, and on
+  2. Are hardware limit switches (manual: "Endschalter") wired and configured, and on
      which inputs? Has one ever been tripped (even if it's released again)?
      -> IOC (hard-blocking/polarity/direction per input), HOC (homing
         sequence config), SWS (LATCHED switch-trip history -- unlike OST's
@@ -30,7 +30,7 @@ drive). Companion to tune_ramp.py (ramp/speed) and probe_move_timing.py
 DO, not how fast.
 
 Reference: FAULHABER RS232 Motion Control manual 7000.00029, chapters 3.3
-(sensor/mode), 3.5 (Endschalter), 4.2 (ANSW), 7.2 (query commands).
+(sensor/mode), 3.5 (Endschalter / limit switches), 4.2 (ANSW), 7.2 (query commands).
 
 USAGE
 -----
@@ -196,7 +196,7 @@ def decode_hoc(val):
 def decode_sws(val):
     print(f"\n  --- SWS decoded (0x{val:08X} / {val}) -- LATCHED switch history ---")
     tripped = (val >> 24) & 0xFF
-    print(f"    Endschalter EVER tripped since last reset (bits 24-31): {format(tripped, '08b')}")
+    print(f"    Limit switch EVER tripped since last reset (bits 24-31): {format(tripped, '08b')}")
     for i in range(5):
         if tripped & (1 << i):
             print(f"      -> Input {i+1} ({_INPUT_NAMES[i]}): HAS TRIPPED (even if released again now)")
@@ -217,13 +217,13 @@ def decode_ost(val, hb=None, hp=None):
     mask (hp) are supplied, the digital-input bits are additionally reported
     as ENGAGED/FREE rather than only as a raw level.
 
-    WHY THIS MATTERS: OST bits 8-12 are "Zustand Eingang 1..5" -- the raw
-    electrical LEVEL of the input (manual Tab. 8), NOT a "switch tripped"
+    WHY THIS MATTERS: OST bits 8-12 are "Zustand Eingang 1..5" (German:
+    "state of input 1..5") -- the raw electrical LEVEL of the input (manual
+    Tab. 8), NOT a "switch tripped"
     flag. With the usual HP=0 configuration a LOW level is the valid endstop
-    condition, so a PRESSED endstop CLEARS its bit. Printing only the set bits
-    as "ACTIVE" (the previous behaviour of this function) reads exactly
-    backwards to a human: at the rig, both endstops free shows as
-    0x0500 = "Input1 ACTIVE + Input3 ACTIVE"."""
+    condition, so a PRESSED endstop CLEARS its bit. Printing only the set
+    bits as "ACTIVE" would read exactly backwards to a human: at the rig,
+    both endstops free shows as 0x0500 = "Input1 ACTIVE + Input3 ACTIVE"."""
     print(f"\n  --- OST decoded (0x{val:04X} / {val}) -- for reference, app already logs this ---")
     names = ["Homing running", "Program sequence running", "Stopped (DELAY)",
              "Stopped (NOTIFY)", "Current limit active", "DEVIATION error",
@@ -335,7 +335,7 @@ def main():
             get_int(ser, "GSTW", "Step width (STW)", " (only meaningful in STEPMOD/GEARMOD)")
             get_int(ser, "GSTN", "Steps per rev (STN)", " (only meaningful in STEPMOD/GEARMOD)")
 
-            print("\n=== Question 2: hardware limit switches (Endschalter) ===")
+            print("\n=== Question 2: hardware limit switches ===")
             ioc = get_int(ser, "IOC", "I/O configuration (raw)")
             if ioc is not None:
                 decode_ioc(ioc)

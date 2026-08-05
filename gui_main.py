@@ -285,7 +285,7 @@ class _VarAdapter:
 
     def __init__(self, initial, widget_setter=None):
         self._value = str(initial)
-        self._setter = widget_setter  # callable(str) auf GUI-Thread
+        self._setter = widget_setter  # callable(str), invoked on the GUI thread
 
     def get(self):
         return self._value
@@ -324,8 +324,8 @@ class _ListboxAdapter:
 
     def __init__(self, qlw: QtWidgets.QListWidget):
         self._w = qlw
-        self._items = []      # Shadow der Zeilen (Strings)
-        self._cur = -1        # Shadow des aktuell gewaehlten Index
+        self._items = []      # Shadow of the row strings
+        self._cur = -1        # Shadow of the currently selected index
         qlw.currentRowChanged.connect(self._on_row_changed)
 
     def _on_row_changed(self, row):
@@ -542,9 +542,9 @@ class PlotManager:
 
     def remove_scan(self, pid):
         """Discard ONE scan entirely: its curve, its points and its legend
-        entry. Previously the only option was Clear Plot, which threw away
-        every trace -- so a single bad sweep among several good ones could not
-        be taken out of the picture."""
+        entry -- without this, the only option is Clear Plot, which throws
+        away every trace, so a single bad sweep among several good ones could
+        not be taken out of the picture on its own."""
         with self._lock:
             meta = self._plots.pop(pid, None)
             if self._active_id == pid:
@@ -1048,9 +1048,9 @@ btn_clear_plot = _btn("Clear Plot")
 btn_clear_plot.setToolTip("Clear ALL traces from the scope (does not touch saved CSV files)")
 
 # --- Traces menu: show/hide or delete INDIVIDUAL curves -------------------
-# Until now the only way to get rid of a trace was Clear Plot, which removes
-# every trace -- so one bad sweep among several good ones could not be taken
-# out of the picture.
+# Without this menu the only way to get rid of a trace is Clear Plot, which
+# removes every trace -- so one bad sweep among several good ones cannot be
+# taken out of the picture on its own.
 btn_traces = _btn("Traces \u25be")
 btn_traces.setToolTip("Show, hide or delete individual traces")
 _traces_menu = QtWidgets.QMenu(btn_traces)
@@ -1222,13 +1222,12 @@ entry_wait = _line_edit(_saved_settings.get("scan_wait_ms") or "0")
 entry_wait.setToolTip(
     "Timebase: the TOTAL time budget for one scan point, in ms.\n"
     "Split as:  pre-settle  ->  averaging  ->  idle remainder.\n"
-    "Formerly labelled 'Wait / dwell', which suggested it was a pause AFTER "
-    "the measurement; it is actually the whole per-point budget that "
-    "pre-settle and averaging are taken out of.")
+    "Not a pause AFTER the measurement -- it is the whole per-point budget "
+    "that pre-settle and averaging are taken out of.")
 
-# Created here (not down in the AVERAGING section where it used to live)
-# because the SCAN grid below places it directly under Timebase -- widgets
-# must exist before addWidget().
+# Created here, not down in the AVERAGING section, because the SCAN grid
+# below places it directly under Timebase -- widgets must exist before
+# addWidget().
 entry_presettle = _line_edit(str(_saved_settings.get("presettle_ms") or PRESETTLE_MS_DEFAULT))
 entry_presettle.setToolTip(
     "Dead time after arriving at a point, BEFORE any measurement, so "
@@ -1301,8 +1300,8 @@ _update_free_run_estimate()
 
 # --- Start / End / Step / Wait in one aligned grid, with the Swap button
 # tucked into a middle column BETWEEN the labels and the Start/End fields,
-# spanning both of those rows. That replaces the old full-width Swap button
-# below the fields -- it saves a row and keeps all four fields on one aligned
+# spanning both of those rows -- this saves a row compared to a full-width
+# Swap button below the fields, and keeps all four fields on one aligned
 # column. Step and Wait sit in the same grid so they line up with Start/End. ---
 btn_swap_start_end.setText("⇅")  # compact: full description is on the tooltip
 btn_swap_start_end.setToolTip("Swap Start and End so the next scan runs the opposite direction")
@@ -1334,8 +1333,8 @@ _sec_scan.add_widget(_scan_grid_w)
 
 _sec_scan.add_widget(btn_scan)       # Start Scan
 _sec_scan.add_widget(btn_free_run)   # Free Run Scan -- directly under Start Scan
-# The long Free Run explanation used to be an always-visible label that didn't
-# fit the narrow panel; it's preserved verbatim here as the button's tooltip.
+# The long Free Run explanation lives in the button's tooltip rather than an
+# always-visible label, which would not fit the narrow panel.
 btn_free_run.setToolTip(
     f"Free Run: ONE continuous move Start→End, raw POS+DAQ polling "
     f"(~20 Hz measured), no averaging, no Pause. Step/Wait not used. "
@@ -1368,10 +1367,10 @@ _avg_hint = QtWidgets.QLabel("")
 _avg_hint.setWordWrap(True)
 _avg_hint.setStyleSheet(f"color:{C_MUTED}; font-size:11px;")
 _sec_avg.add_widget(_avg_hint)
-# Pre-settle row moved to the SCAN section (directly under Timebase) -- it is
-# subtracted from the timebase and applies to both averaging modes, so it
-# belongs next to the budget it consumes, not inside a collapsed AVERAGING
-# panel.
+# Pre-settle's own row lives in the SCAN section (directly under Timebase),
+# not here: it is subtracted from the timebase and applies to both averaging
+# modes, so it belongs next to the budget it consumes, not inside a
+# collapsed AVERAGING panel.
 _panel_lay.addWidget(_sec_avg)
 
 # =========================== SECTION: QUEUE ========================
@@ -1453,8 +1452,9 @@ entry_export_dir = _line_edit(_saved_settings.get("export_dir") or os.path.expan
 btn_browse = _btn("Browse…")
 entry_pattern = _line_edit(_saved_settings.get("export_pattern") or "scan_{date}_{time}_{start}-{end}nm_{mode}.csv")
 btn_save_now = _btn("Save CSV now")
-# btn_clear_plot moved out of EXPORT to the scope toolbar (created just after
-# the _btn() factory, above) -- it was too hard to find down here.
+# btn_clear_plot lives on the scope toolbar (created just after the _btn()
+# factory, above), not here in EXPORT -- it acts on the plot, so it belongs
+# next to it rather than buried at the bottom of a collapsed section.
 _sec_exp.add_widget(_chk_autosave)
 _sec_exp.add_row("Folder", entry_export_dir)
 _sec_exp.add_widget(btn_browse)
@@ -1927,7 +1927,7 @@ def _browse_export_dir():
 
 
 # =====================================================================
-# VERDRAHTUNG: Qt-Widgets -> Adapter -> app_context (refs/vars/hooks)
+# WIRING: Qt widgets -> adapters -> app_context (refs/vars/hooks)
 # =====================================================================
 # 1) Register the console as the log sink (before the initial state calls below).
 set_log_sink(_console_log_sink)
@@ -2317,13 +2317,14 @@ def _on_free_run_sp_edited():
     always what will actually be sent.
 
     INVALID/EMPTY INPUT FALLS BACK TO THE LAST VALID VALUE, NOT TO RAMP_SP.
-    This used to fall back to RAMP_SP, i.e. to the MAXIMUM speed. Because
-    editingFinished also fires on focus loss, merely clicking into the field,
-    clearing it and clicking away silently rewrote it to full speed -- the
-    user's next sweep then ran up to 10x faster than the one they had set up,
-    with no warning beyond the missing override line in the log. Falling back
-    to the previous value keeps an accidental edit from becoming a speed
-    change; a deliberate speed change still needs a valid number.
+    Falling back to RAMP_SP (the MAXIMUM speed) would be dangerous here:
+    editingFinished also fires on focus loss, so merely clicking into the
+    field, clearing it and clicking away would silently rewrite it to full
+    speed -- the next sweep would then run up to 10x faster than the one
+    that was set up, with no warning beyond the missing override line in the
+    log. Falling back to the previous value keeps an accidental edit from
+    becoming a speed change; a deliberate speed change still needs a valid
+    number.
 
     NOTE: the last valid value is held in _last_valid_free_run_sp, NOT read
     back from the adapter -- the adapter's shadow follows textChanged, so by

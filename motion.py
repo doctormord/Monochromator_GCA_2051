@@ -632,10 +632,10 @@ def reference_run_action(on_done=None):
                 # The reference move is a REAL motor move (REFERENCE_MOVE_NM in
                 # REFERENCE_DIRECTION), not a no-op -- state['current_nm'] and
                 # the GUI 'Current λ' field must move with it, same as every
-                # other successful move in scan_engine.py. Previously neither
-                # was updated here, so state['current_nm']/entry_current
-                # silently drifted by REFERENCE_MOVE_NM off the real position
-                # on every Reference Run, corrupting the next Goto/Scan target.
+                # other successful move in scan_engine.py. Without this update,
+                # state['current_nm']/entry_current would silently drift by
+                # REFERENCE_MOVE_NM off the real position on every Reference
+                # Run, corrupting the next Goto/Scan target.
                 state['current_nm'] = float(state.get('current_nm', 0.0)) + delta_nm
                 try:
                     refs['entry_current'].delete(0, "end")
@@ -673,11 +673,12 @@ def reference_run_action(on_done=None):
                 except Exception as e:
                     log(f"[REF] on_done callback failed: {e}", "warn")
 
-    # BUGFIX (Stop during a Reference Run did not stop): this move set no busy
-    # flag at all, so stop_action()'s was_running check saw neither
-    # is_scanning nor is_moving, skipped its wait entirely and re-armed the
-    # drive (clearing stop_flag) before _worker's wait_until_position() had
-    # necessarily noticed the Stop -- the same race that was fixed for Goto.
+    # Without setting a busy flag here, stop_action()'s was_running check
+    # would see neither is_scanning nor is_moving during a Reference Run, so
+    # it would skip its wait entirely and re-arm the drive (clearing
+    # stop_flag) before _worker's wait_until_position() has necessarily
+    # noticed the Stop -- the same race that state['is_moving'] closes for
+    # Goto (see scan_engine.stop_action's docstring).
     # Set on the caller's (GUI) thread, before the thread starts, so the
     # busy check above and this assignment cannot be interleaved by a second
     # click. Cleared in _worker's finally block on every exit path.

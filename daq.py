@@ -60,16 +60,18 @@ def daq_source_label() -> str:
     REALISTIC-looking spectrum -- baseline plus emission lines at 486/589/656
     nm, with noise -- which is exactly what makes it dangerous: a scan recorded
     without hardware looks like a valid measurement, at plausible wavelengths,
-    with no hint anywhere that it is synthetic. Nothing in the GUI used to say
-    so. Every place that shows or stores a measured value now labels the
-    source through this function."""
+    with no hint anywhere that it is synthetic unless something actively says
+    so. Every place that shows or stores a measured value labels the source
+    through this function."""
     return "NI-DAQ" if DAQ_AVAILABLE else "SIMULATED"
 
-# Rate-limit for DAQ read-error logging in read_pmt_voltage(). A hardware/driver
-# fault there previously returned 0.0 SILENTLY -> a scan would fill with flat
-# zeros and nothing in the log said why. We now log the error, but read_pmt_
-# voltage() runs in a tight averaging loop (N reads per point), so a persistent
-# fault would flood the console; this timestamp throttles it to ~once/2 s.
+# Rate-limit for DAQ read-error logging in read_pmt_voltage(). A hardware/
+# driver fault there returns 0.0 so scan/averaging math never crashes on a
+# transient glitch, but that alone would make a scan fill with flat zeros
+# with nothing in the log to say why -- so the error is logged too. read_pmt_
+# voltage() runs in a tight averaging loop (N reads per point), so a
+# persistent fault would flood the console; this timestamp throttles logging
+# to ~once/2 s.
 _last_daq_read_err_log = 0.0
 _DAQ_READ_ERR_LOG_INTERVAL_S = 2.0
 
@@ -166,10 +168,10 @@ def read_pmt_voltage(chan=None, samples=DAQ_SAMPLES_PER_READ, rate=DAQ_SAMPLE_RA
             _note_last_pmt(v)
             return v
     except Exception as e:
-        # Previously swallowed silently (return 0.0). Keep the 0.0 return so
-        # scan/averaging math never crashes on a transient glitch, but surface
-        # the cause -- otherwise a wiring/driver fault looks like a genuine 0 V
-        # signal. Throttled so a persistent fault can't flood the log.
+        # Keep the 0.0 return so scan/averaging math never crashes on a
+        # transient glitch, but surface the cause too -- otherwise a
+        # wiring/driver fault looks like a genuine 0 V signal. Throttled so a
+        # persistent fault can't flood the log.
         global _last_daq_read_err_log
         now = time.time()
         if now - _last_daq_read_err_log >= _DAQ_READ_ERR_LOG_INTERVAL_S:
@@ -186,9 +188,9 @@ def _simulated_pmt_voltage() -> float:
     scan step, so an nm-dependent shape produces a RECOGNIZABLE curve while
     scanning (baseline + a few emission lines: H-beta 486, He I D3 587.5618,
     Na-D 589, H-alpha 656 nm) instead of pure noise -- this lets the whole path (plot, averaging,
-    CSV) be checked meaningfully. Without a known nm it falls back to the old
-    noise value. Affects ONLY the simulator; the real NI-DAQ read routine is
-    unchanged."""
+    CSV) be checked meaningfully. Without a known nm it falls back to pure
+    noise around 0.2 V. Affects ONLY the simulator; the real NI-DAQ read
+    routine is unchanged."""
     try:
         nm = float(state.get('current_nm'))
     except Exception:
@@ -286,10 +288,11 @@ def acquire_measurement(dwell_s: float) -> float:
     Acquire ONE averaged data point using the current GUI averaging settings.
 
     This is the SINGLE SOURCE OF TRUTH for point acquisition. scan_worker and
-    do_resume both call it, so their averaging behaviour can never drift
-    apart again (previously scan_worker measured with a single raw
-    read_pmt_voltage() and ignored the AVG controls entirely, while only
-    do_resume averaged -- that's why AVG looked broken on a normal scan).
+    do_resume both call it, so their averaging behaviour cannot drift apart:
+    if either one measured with its own raw read_pmt_voltage() call instead,
+    it would silently ignore the AVG controls, and a scan would apply
+    averaging inconsistently depending on which code path measured the
+    point.
 
     Per-point timing budget (all consumed BEFORE the move to the next point).
     The GUI calls dwell_s the "Timebase" -- it is the total time budget for
@@ -310,19 +313,20 @@ def acquire_measurement(dwell_s: float) -> float:
                     measurement time that is actually available, i.e. of
                     (timebase - pre-settle).
 
-    FRACTION SEMANTICS CHANGED (deliberate, user-approved):
-        old:  window = min(dwell - presettle, dwell * frac)
-        new:  window = (dwell - presettle) * frac
-    The old form took the percentage of the FULL timebase and then merely
-    CAPPED it at what was left after pre-settle. Consequence: with
-    timebase 1000 ms and pre-settle 200 ms, anything from 80 % upwards
-    produced the same 800 ms window -- the setting silently stopped having an
-    effect, and where that ceiling sat depended on pre-settle. Now "50 %"
-    always means half of the available measurement time, whatever pre-settle
-    is set to.
-    NOTE FOR DATA COMPARABILITY: at identical settings this changes the
-    averaging window, hence the noise floor. Scans recorded before and after
-    this change are not directly comparable in 'time' mode.
+    FRACTION SEMANTICS (deliberate, user-approved):
+        window = (dwell - presettle) * frac
+    NOT window = min(dwell - presettle, dwell * frac): that alternative form
+    takes the percentage of the FULL timebase and then merely CAPS it at
+    what is left after pre-settle. Consequence: with timebase 1000 ms and
+    pre-settle 200 ms, anything from 80 % upwards would produce the same
+    800 ms window -- the setting would silently stop having an effect, and
+    where that ceiling sits would depend on pre-settle. With the formula
+    actually used, "50 %" always means half of the available measurement
+    time, whatever pre-settle is set to.
+    NOTE FOR DATA COMPARABILITY: at identical settings the choice of formula
+    changes the averaging window, hence the noise floor -- scans recorded
+    under a different formula version are not directly comparable in 'time'
+    mode.
 
     Returns the averaged PMT voltage (float).
     """

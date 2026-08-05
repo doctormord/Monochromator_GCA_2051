@@ -63,8 +63,8 @@ def _is_no_reply_cmd(cmd: str) -> bool:
     reply there is a genuine fault and must still trigger RESYNC.
 
     If the drive is NOT in silent mode (MOTOR_ANSW_MODE != 0), this returns
-    False for everything and the old behaviour is used unchanged -- acks are
-    then expected and read normally."""
+    False for everything, so acks are expected and read normally, exactly
+    like any other command."""
     if MOTOR_ANSW_MODE != 0:
         return False
     m = _CMD_PREFIX_RE.match(cmd.strip())
@@ -77,17 +77,16 @@ def _drain_late_reply(s):
     """Discard a reply that is still arriving from a PREVIOUS command, without
     cutting it in half.
 
-    WHY THIS REPLACED A BARE reset_input_buffer():
-    send_cmd used to flush the input buffer unconditionally right before
-    writing the next command. If a late reply from the previous query was
-    still STREAMING IN at that moment, the flush discarded only the bytes that
-    had arrived so far -- the remaining digits landed in the buffer afterwards
-    and were then read as if they were the answer to the NEW query. At 9600
-    baud an 8-digit POS reply takes ~9 ms to clock in, so the window is real.
-
-    That is what the rig log shows: rejected POS replies of '1' and '103862'
-    where the true position was a 7-8 digit number -- fragments of a position,
-    NOT stale-but-valid old readings.
+    WHY NOT A BARE reset_input_buffer(): flushing the input buffer
+    unconditionally right before writing the next command is not safe if a
+    late reply from the previous query is still STREAMING IN at that moment
+    -- the flush would discard only the bytes that had arrived so far, and
+    the remaining digits would land in the buffer afterwards and get read as
+    if they were the answer to the NEW query. At 9600 baud an 8-digit POS
+    reply takes ~9 ms to clock in, so the window is real: this is what
+    produces rejected POS replies like '1' or '103862' where the true
+    position is a 7-8 digit number -- fragments of a position, NOT
+    stale-but-valid old readings.
 
     TWO TRIGGERS, because checking the buffer alone is not enough:
       1. Bytes already waiting -> a late reply has STARTED arriving. Wait one
@@ -97,10 +96,10 @@ def _drain_late_reply(s):
       2. state['serial_dirty'] -> the PREVIOUS read timed out or came back
          truncated, so a reply is owed to us but may not have started arriving
          yet (in_waiting == 0 at this instant proves nothing). Wait the longer
-         recovery settle, then drain. This is the deterministic half of the
-         fix: it targets the exact sequence that produces fragments (read
-         times out -> reply arrives late -> next write flushes it mid-stream)
-         instead of hoping to catch it in the act."""
+         recovery settle, then drain. This is the deterministic trigger: it
+         targets the exact sequence that produces fragments (read times out
+         -> reply arrives late -> next write flushes it mid-stream) instead
+         of relying on catching it in the act via trigger 1."""
     dirty = bool(state.get("serial_dirty"))
     try:
         n = getattr(s, "in_waiting", None)
@@ -175,7 +174,8 @@ def _read_reply_until_cr(s, total_deadline_s, gap_s):
 
 def _consume_trailing_lf(s, timeout_s):
     """Consume the LF that FOLLOWS every reply's CR, per the manual
-    (DE_7000_00029, 4.2): "Antwort ... CR ... LF" -- confirmed at the rig via
+    (DE_7000_00029, 4.2): "Antwort ... CR ... LF" (German: "response ... CR
+    ... LF") -- confirmed at the rig via
     idle_poll_test.py, where in a 120s/2401-poll idle-only run every single
     poll reported a "late reply drain" (late_reply_drains == polls exactly).
     That was never a real anomaly: _read_reply_until_cr() stops AT the CR and
@@ -222,10 +222,11 @@ def send_cmd(cmd: str, timeout: float = 1.0) -> str:
 
     REPLY INTEGRITY: a reply is only returned if it was actually terminated by
     CR. pyserial's read_until() returns whatever it managed to read when it
-    times out, WITHOUT the terminator -- so a slow/partial reply used to be
-    handed upward as a shorter, perfectly parseable number. For POS that means
-    a truncated position silently becomes a real-looking position. Such a read
-    is now treated as a failure (empty return -> RESYNC), which is what it is.
+    times out, WITHOUT the terminator -- so a slow/partial reply would
+    otherwise be handed upward as a shorter, perfectly parseable number. For
+    POS that means a truncated position would silently become a real-looking
+    position. Such a read is treated as a failure (empty return -> RESYNC),
+    which is what it is.
     """
     if not ser_ok():
         return ""
@@ -277,14 +278,12 @@ def send_cmd(cmd: str, timeout: float = 1.0) -> str:
                 state["serial_dirty"] = True
             # RESYNC on timeout/empty response (optional).
             #
-            # DOES NOT RE-QUERY ANY MORE. It used to write an extra "POS" and
-            # throw the answer away. On a link that is already failing to
-            # deliver complete replies that is the worst possible response:
-            # the 2026-07-23 rig log shows one such extra write after EVERY
-            # truncation (127 of them in a single slow sweep), i.e. the
-            # recovery step doubled the traffic exactly when the link was
-            # struggling, and each extra reply became the next command's
-            # problem. Draining and letting the caller retry is enough --
+            # Drains and lets the caller retry -- does NOT re-query. Writing
+            # an extra "POS" and throwing away the answer would double the
+            # traffic on a link that is already failing to deliver complete
+            # replies (rig-observed: 127 truncations in a single slow sweep),
+            # right when it is least able to afford it, and each extra reply
+            # would become the next command's problem. Draining is enough --
             # _drain_late_reply() + serial_dirty already handle the orphan.
             if (not raw) and RESYNC_ON_TIMEOUT:
                 try:
@@ -411,16 +410,15 @@ def init_motor():
     # whole protocol layer already assumes the drive only ever replies to what
     # was just asked and never volunteers anything, and silent mode is what
     # makes that assumption true. The manual documents the Motion-Manager
-    # DEFAULT as NOT silent; this app previously sent no ANSW at all and simply
-    # inherited whatever was last configured on the drive.
+    # DEFAULT as NOT silent, so this must be set explicitly rather than
+    # relying on whatever was last configured on the drive.
     #
     # COST OF SILENT MODE, and why it must be paired with NO_REPLY_COMMANDS:
     # in ANSW0 the drive does not acknowledge SET commands (EN/HP0/V0/AC/DEC/
-    # SP/LR/M/ST). When this line was first added, send_cmd still waited for a
-    # reply after each of them -> full timeout + resync probe (~1.2 s) per
-    # command, ~14 s of dead time per Go To, and a wall of misleading
-    # "[RESYNC] Timed out" lines on the rig. send_cmd now recognises those
-    # commands and writes them fire-and-forget instead (see _is_no_reply_cmd).
+    # SP/LR/M/ST). Waiting for a reply after each of them would cost a full
+    # timeout + resync probe (~1.2 s) per command -- roughly 14 s of dead time
+    # per Go To. send_cmd instead recognises those commands and writes them
+    # fire-and-forget (see _is_no_reply_cmd).
     # ANSW is RAM-only here (no SAVE/EEPSAV), so it stays set on the drive
     # until power-cycle -- a mode set in one session is still active in the
     # next one.
@@ -433,8 +431,8 @@ def safe_stop():
     """Bring the drive to a controlled halt: stop the move, then park it in
     velocity mode at 0 rpm (which also releases the position controller).
 
-    "HP0" used to sit between the two. It is a limit-switch polarity
-    CONFIGURATION write, not a stop command -- see
+    "HP0", when SEND_LEGACY_HP0 is enabled, is sent between the two. It is a
+    limit-switch polarity CONFIGURATION write, not a stop command -- see
     device_constants.SEND_LEGACY_HP0. It is only sent if that flag is on."""
     send_cmd("ST")
     if SEND_LEGACY_HP0:
@@ -473,8 +471,9 @@ def read_temperature():
     Returns an int in degrees Celsius, or None on a missing/garbled reply.
 
     WHAT THIS VALUE ACTUALLY IS (manual DE_7000_00029, 7.5 / 3.8.4):
-    TEM is the "Gehäusetemperatur" -- the HOUSING temperature measured inside
-    the unit, not a separate motor sensor. This rig's drive reports
+    TEM is the manual's "Gehäusetemperatur" (housing temperature) -- the
+    HOUSING temperature measured inside the unit, not a separate motor
+    sensor. This rig's drive reports
     GTYP = 'CS-BX4', i.e. one of the integrated units on the manual's cover
     (32xx...BX4 CS), where motor and electronics share that housing -- so for
     THIS hardware the housing temperature does track the motor's housing.
@@ -520,9 +519,9 @@ def read_position_or_none():
     into a plotted wavelength via motion.steps_to_delta_nm) cannot tolerate
     that: a transient serial timeout silently becomes a plausible-looking
     position of exactly 0 steps, which is then plotted as a wild, wrong
-    wavelength jump -- this is what produced the zigzag/garbage traces in
-    a free-run plot. This variant lets such a caller detect and SKIP a
-    failed read instead of trusting a fabricated zero."""
+    wavelength jump -- producing zigzag/garbage traces in a free-run plot.
+    This variant lets such a caller detect and SKIP a failed read instead of
+    trusting a fabricated zero."""
     val, _raw = read_position_raw_or_none()
     return val
 
@@ -530,14 +529,13 @@ def read_position_raw_or_none():
     """Same as read_position_or_none(), but also returns the RAW string the
     drive actually sent, before parsing -- (parsed_int_or_None, raw_str).
 
-    WHY: when scan_engine's free-run outlier filter rejects an impossible
-    POS jump, the previous version only logged "rejected", discarding the
-    exact bytes that caused it. That's not enough to diagnose WHERE a wrong
-    value like the repeating ~587 nm spike (BACKLOG.md) actually came from
-    -- a garbled/partial reply looks very different from a stale-but-valid
-    OLD reply from several polls ago. Keeping the raw string lets the
-    outlier path log it verbatim for forensic comparison next time it
-    happens, instead of just recording that *a* rejection occurred."""
+    WHY: keeping the raw string lets scan_engine's free-run outlier filter
+    log the exact bytes verbatim when it rejects an impossible POS jump,
+    instead of merely recording that *a* rejection occurred. That matters
+    because a garbled/partial reply looks very different from a
+    stale-but-valid OLD reply from several polls ago -- e.g. the repeating
+    ~587 nm spike (BACKLOG.md) -- and only the raw bytes let you tell them
+    apart after the fact."""
     try:
         raw = send_cmd("POS", timeout=POLL_TIMEOUT)
         if not raw:

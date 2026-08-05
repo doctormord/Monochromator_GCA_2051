@@ -49,15 +49,13 @@ state = {
     # goto_worker), including its auto-recover retry after a Stop. Mirrors
     # is_scanning's role: stop_action()'s _stop_worker waits on
     # (is_scanning OR is_moving) before calling recover_after_stop(), so a
-    # Stop pressed during a GoTo no longer re-arms the drive (clearing
+    # Stop pressed during a GoTo cannot re-arm the drive (clearing
     # stop_flag) while goto_worker's own wait_until_position() poll is still
-    # running -- that race meant stop_flag could be cleared before
-    # goto_worker's poll ever saw it True, so the GoTo just sat there until
-    # its full move timeout (up to MAX_MOVE_TIMEOUT = 900 s) elapsed instead
-    # of aborting promptly. Confirmed via a live thread-stack dump in SIM
-    # (sim_defect_probe.py): goto_worker was still parked inside
-    # wait_until_position() 18+ s after Stop was pressed and "recovered"
-    # had already been logged.
+    # running. Without waiting on is_moving here, stop_flag could be cleared
+    # before goto_worker's poll ever saw it True, so the GoTo would just sit
+    # there until its full move timeout (up to MAX_MOVE_TIMEOUT = 900 s)
+    # elapsed instead of aborting promptly -- confirmed via a live
+    # thread-stack dump in SIM (sim_defect_probe.py).
     "is_moving": False,
     "is_paused": False,
     "stop_flag": False,
