@@ -1,7 +1,8 @@
 # BACKLOG — VRS41
 
 > Lebendes Dokument. Überschreiben, nicht anhäufen. Priorität: P0 = jetzt, P3 = später.
-> Stand: 2026-08-04. SIM-Diagnose- und Fix-Session eingearbeitet.
+> Stand: 2026-08-05. SIM-Diagnose- und Fix-Session (04.08.) sowie ein reines
+> Doku-/Kommentar-Audit (05.08., keine Verhaltensänderung) eingearbeitet.
 >
 > **Diese Datei ist die Aufgabenliste.** Beobachtung, Ausschlussbegründungen,
 > Hypothesentabelle, Messansatz und Testprotokoll zum P0-Thema stehen in
@@ -312,6 +313,23 @@ am Rig zur Bestätigung.
       Repo. Das war **falsch**, sie liegt weiterhin dort (~25 kB). In
       `HANDOVER.md` korrigiert; Status: historische Referenz wie der
       ex-Monolith, von nichts importiert, bewusst nicht gelöscht.
+- [x] **„Alles Code-seitig auf Englisch, per Grep gegengeprüft" war nur
+      teilweise wahr (2026-08-05).** Der Sweep vom 23.07. hatte einzelne
+      unübersetzte deutsche Fachbegriffe nicht gefunden, weil sie nicht in
+      der damaligen Wortliste standen (u.a. `Kommandoset` und `Verdrahtung`
+      als Abschnitts-Header in Kommentaren, `Endschalter` unquotiert
+      mehrfach in `read_faulhaber_config.py`, ein echtes deutsches
+      Kommentar-Paar in `gui_main.py`). Mit deutlich breiterer Wortliste
+      (Präpositionen, Fachvokabular, Header-Muster) erneut geprüft und auf
+      0 Treffer verifiziert. Wörtliche Zitate aus dem deutschen Handbuch
+      (`Gehäusetemperatur`, `Zustand Eingang`, `Antwort`) bleiben bewusst
+      mit Übersetzung daneben stehen statt vollständig entfernt zu werden —
+      zur Rückverfolgbarkeit gegen das Handbuch. Bei der Gelegenheit auch
+      ~50 als Fix-Changelog geschriebene Kommentare ("BUGFIX (Defect
+      A/B/C)", "used to be X") in Verhaltensdoku überführt, ohne den
+      technischen Gehalt zu kürzen. Reine Doku-/Kommentarqualität, keine
+      Codelogik geändert (SIM-Smoke-Test bestätigt). Details: `HISTORY.md`
+      2026-08-05.
 - [x] **Begriffe „Slip" und „Backlash" vereinheitlicht (2026-08-04).** Beide
       bezeichneten dieselbe Größe — das mechanische Spiel. Die GUI zeigte
       beides gleichzeitig (Feld „Slip / Backlash (nm)", ein Status-Label

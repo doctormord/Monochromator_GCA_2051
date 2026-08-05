@@ -1,13 +1,15 @@
 # HANDOVER — VRS41 Monochromator/Scan-Controller
 
 > Lebendes Dokument. Überschreiben, nicht anhäufen. Prosa DE, Code/Bezeichner EN.
-> Stand: 2026-08-04. Konsolidiert aus allen HANDOVER/BACKLOG/HANDOFF-Ständen bis
+> Stand: 2026-08-05. Konsolidiert aus allen HANDOVER/BACKLOG/HANDOFF-Ständen bis
 > HANDOFF_2026-07-23b + Offset-Diagnose-Session 2026-07-29/31 + Diagnose-Patch
 > angewendet 2026-08-04 + SIM-Diagnose-/Fix-Session 2026-08-04 (Defect A/B
 > behoben, Defect C entschärft, Stop/GoTo-Race, vier Folgefehler aus dem
 > Selbst-Review, Slack-first-Modell, Begriffsvereinheitlichung
-> Slip → Backlash). **Alles NUR SIM-verifiziert, keine Rig-Session** —
-> s. „AKTUELL" unten. Chronologie aller Sessions: `HISTORY.md`.
+> Slip → Backlash) + Doku-/Kommentar-Audit 2026-08-05 (reine Sprachqualität,
+> keine Verhaltensänderung — s. unten und `HISTORY.md`). **Fachlich alles
+> weiterhin NUR SIM-verifiziert, keine Rig-Session** — s. „AKTUELL" unten.
+> Chronologie aller Sessions: `HISTORY.md`.
 
 ## Rollenverteilung der Dokumente
 
@@ -138,7 +140,16 @@ markieren statt stillschweigend entfernen).
   0x0400 = Input 1 gedrückt. `HD = 00101` → beide Schalter blockieren dieselbe
   Fahrtrichtung.
 - Layout-Bugs (Panel-Breite, Notstop-Button) behoben.
-- Alles Code-seitig auf Englisch (Docs bleiben Deutsch), per Grep gegengeprüft.
+- Alles Code-seitig auf Englisch (Docs bleiben Deutsch). **Korrektur
+  2026-08-05:** der frühere Grep-Sweep (23.07.) war unvollständig — mehrere
+  einzelne deutsche Fachbegriffe ohne Anführungszeichen/Übersetzung waren
+  ihm entgangen, weil sie in keiner damaligen Wortliste standen (u.a.
+  `Kommandoset`, `Verdrahtung` als Abschnitts-Header, `Endschalter`
+  unquotiert, ein echtes Kommentar-Paar in `gui_main.py`). Mit breiterer
+  Wortliste gefunden und übersetzt; wörtliche Zitate aus dem deutschen
+  Handbuch (`Gehäusetemperatur`, `Zustand Eingang`, `Antwort`) bleiben mit
+  Übersetzung daneben stehen, zur Rückverfolgbarkeit. Details: `HISTORY.md`
+  2026-08-05.
 
 ## Zwei Eigenschaften, die man kennen muss
 

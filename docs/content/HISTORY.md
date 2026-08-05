@@ -923,3 +923,85 @@ bleibt die Rig-Session** (T3/T4 aus CONTEXT.md, `slip_nm`-Kalibrierung via
 `backlash_cal.py`, danach TESTPLAN.md Section 3c). Besonders Fix B (Stop
 fährt nicht mehr nach) ändert echtes Antriebsverhalten und ist bisher
 ausschließlich in SIM belegt.
+
+## 2026-08-05
+
+Englisch-/Kommentar-Audit über alle Projekt-`.py`-Dateien (kein P0-Bezug,
+reine Doku-Qualität).
+
+Nutzer bat um zwei Dinge: (1) alle `.py`-Dateien auf verbliebenes Deutsch
+prüfen — Code/Kommentare/GUI-Strings sollen laut CLAUDE.md komplett
+Englisch sein; (2) die teils sehr langen, als Fix-Changelog geschriebenen
+Kommentare ("BUGFIX (Defect A/B/C)", "used to be X", datierte
+Rig-Log-Einträge) in die sonst im Projekt übliche Form bringen: pro
+Funktion knapp beschreiben was sie tut, mit welchen Parametern, wovon sie
+abhängt, warum sie existiert — nicht die Historie eines Bugfixes erzählen.
+`monochromator_python_code_vrs41.py` (ex-Monolith) bewusst ausgenommen,
+laut CLAUDE.md historische Referenz, nicht ohne Rücksprache anzufassen.
+
+Arbeit lief zunächst in einem versehentlich vom veralteten `origin/main`
+statt `origin/testing` erzeugten Worktree (Standard-Basisverhalten des
+Worktree-Tools) — bemerkt, bevor etwas editiert wurde, sauber verworfen,
+neuer Worktree korrekt von `origin/testing` (Stand `2190a2c`) erzeugt.
+
+**Sprachbereinigung, Runde zwei.** Die Session vom 22./23.07. hatte
+bereits "per Grep auf 0 Treffer verifiziert" vermerkt — dieser Sweep war
+unvollständig: mehrere deutsche Fachbegriffe waren ohne Anführungszeichen/
+Übersetzung in Kommentare und sogar einen Konsolen-Print-String gerutscht,
+weil sie in keiner damaligen Wortlisten-Suche auftauchten (einzelne
+Wörter, keine ganzen Sätze mit Artikeln/Konjunktionen). Gefunden: ein
+echtes deutsches Kommentar-Paar in `gui_main.py`
+(`_ListboxAdapter.__init__`, "Shadow der Zeilen (Strings)"/"Shadow des
+aktuell gewählten Index"), plus unübersetzte Fachbegriffe:
+`Gehäusetemperatur` (`protocol_faulhaber.py`), `Zustand Eingang`
+(`device_constants.py`, `read_faulhaber_config.py`), `Antwort`
+(`protocol_faulhaber.py`), `Kommandoset` (`device_constants.py`),
+`Verdrahtung` als Abschnitts-Header (`gui_main.py`), `Endschalter` an vier
+Stellen in `read_faulhaber_config.py` (davon eine echte Konsolenausgabe,
+`print("... Endschalter EVER tripped...")` — jetzt vollständig Englisch).
+Wo es sich um wörtliche Zitate aus dem deutschen Handbuch handelt
+(Gehäusetemperatur, Zustand Eingang, Antwort), blieb der deutsche
+Originalbegriff zur Rückverfolgbarkeit gegen das Handbuch stehen, jetzt
+mit Übersetzung daneben statt unübersetzt im englischen Fließtext.
+Abschließend mit einer deutlich breiteren Wortliste (Präpositionen,
+Fachvokabular, Abschnitts-Header-Muster) erneut auf 0 Treffer verifiziert.
+
+**Kommentar-Umschrift.** In `scan_engine.py`, `protocol_faulhaber.py`,
+`device_constants.py`, `gui_main.py`, `sim_hardware.py`, `daq.py`,
+`motion.py` und `app_context.py` rund 50 Kommentarblöcke von
+Changelog-Erzählung ("BUGFIX (Defect A/B/C) ... used to be X ... an
+earlier comment in this file claiming otherwise was wrong") in
+Gegenwarts-Beschreibung des aktuellen Verhaltens/der Begründung
+überführt — Messwerte, Ursache-Wirkung-Erklärungen und Edge-Case-Doku
+blieben vollständig erhalten (Doku-Policy: kürzen nur, nicht löschen ohne
+Rücksprache — hier war das Kürzen der Changelog-Rahmung durch den Nutzer
+in derselben Session explizit angefragt), nur die Ticket-/
+Changelog-Rahmung ist raus. Der große `stop_action()`-Docstring in
+`scan_engine.py` (zwei Race-Conditions, ~40 Zeilen Vorher/Nachher-
+Erzählung) wurde dabei am stärksten gestrafft, ohne die Timing-Begründung
+(~20 ms vs. 50 ms `PAUSE_POLL_S`) zu verlieren, die den Race erst erklärt.
+
+**Bewusst unverändert gelassen:** `sim_defect_probe.py`s "Defect
+A/B/C"-Sprache — das Skript ist die aktive Dokumentation der noch offenen
+P0-Untersuchung (s. `CONTEXT.md`/`BACKLOG.md`), keine Alt-Kommentare.
+Ebenso die übrigen eigenständigen Diagnose-Skripte (`idle_poll_test.py`,
+`offset_probe.py`, `step_resolution_test.py`, `probe_move_timing.py`,
+`tune_ramp.py`) — datierte Messergebnisse mit Schlussfolgerung sind dort
+der eigentliche Inhalt, kein Beiwerk. Nur fehlende Funktions-Docstrings in
+`sim_defect_probe.py` ergänzt (`section`, `wait_until`, `dump_recent_log`,
+`connect_sim`, `reference_run`, `do_goto`, `do_scan`, `truth_nm`).
+
+**Verifikation:** `py_compile` auf allen 19 geprüften Dateien grün;
+zusätzlich echter Skriptstart (`QT_QPA_PLATFORM=offscreen python3
+sim_defect_probe.py`) — kompletter Connect→Reference-Run→Scan→GoTo→Stop-
+Durchlauf, Section 3/4-Ergebnisse identisch zum in `CONTEXT.md`
+dokumentierten Stand (`−0.00874 nm` / `+0.00000 nm`). Reine
+Doku-/Kommentaränderung, keine Codelogik angefasst — P0-Diagnosestand
+unverändert, Rig-Session bleibt der nächste Schritt.
+
+CONTEXT.md/HANDOVER.md/BACKLOG.md aktualisiert: Stand-Datum, ein
+Doku-Korrektur-Eintrag zur unvollständigen 23.07.-Sprachverifikation,
+sonst inhaltlich unverändert (keine neuen Diagnosebefunde diese Session).
+Lokal committet, auf Nutzerwunsch nach `origin/testing` gepusht
+(Fast-Forward, da `origin/testing` seit dem Branchen dieser Session nicht
+weitergelaufen war).

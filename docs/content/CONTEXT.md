@@ -1,10 +1,13 @@
 # CONTEXT.md — VRS41: technischer Tiefgang
 
 > Verdichtung aus mehreren Chat-Exports + HANDOVER/BACKLOG/HANDOFF-Ständen.
-> Stand: 2026-08-04 (SIM-Diagnose- und Fix-Session eingearbeitet — Defect
-> A/B code-seitig behoben und in SIM verifiziert, Defect C mit Re-Anchor
-> entschärft, ein vierter Fund (Stop/GoTo-Race) dabei entdeckt und ebenfalls
-> behoben. Alles NUR in SIM verifiziert — Rig-Session steht noch aus).
+> Stand: 2026-08-05 (Doku-/Kommentar-Audit eingearbeitet — reine
+> Sprach-/Kommentarqualität in den `.py`-Dateien, KEINE Änderung am
+> Diagnosestand oder an der Codelogik, s. `HISTORY.md`. Inhaltlich weiterhin
+> die SIM-Diagnose- und Fix-Session vom 2026-08-04: Defect A/B code-seitig
+> behoben und in SIM verifiziert, Defect C mit Re-Anchor entschärft, ein
+> vierter Fund (Stop/GoTo-Race) dabei entdeckt und ebenfalls behoben. Alles
+> NUR in SIM verifiziert — Rig-Session steht noch aus).
 >
 > **Abgrenzung:** Architektur und rig-bestätigter Stand stehen in `HANDOVER.md`,
 > die Aufgabenliste in `BACKLOG.md`. Hier steht nur, was zum *Verstehen* der
@@ -335,3 +338,11 @@ bleibt die Rig-Session nötig.
   Defect C mit Re-Anchor entschärft (kein vollständiger Fix, s. oben),
   Stop/GoTo-Race + fsm-während-Retry-Bug gefunden und behoben,
   `sim_defect_probe.py` erstellt. Alles NUR SIM-verifiziert.
+- Doku-/Kommentar-Audit 2026-08-05 — alle `.py`-Dateien auf verbliebenes
+  Deutsch geprüft (weitere Funde über den 23.07.-Sweep hinaus, u.a.
+  `Kommandoset`/`Verdrahtung`/`Endschalter` unquotiert und ein echtes
+  Kommentar-Paar in `gui_main.py`) und Changelog-artige Kommentare
+  ("BUGFIX (Defect A/B/C)", "used to be X") in Verhaltensdoku überführt.
+  Reine Sprachqualität — keine Änderung an der P0-Diagnose oder am
+  Code-Verhalten (SIM-Smoke-Test bestätigt identisches Ergebnis). Details:
+  `HISTORY.md`.
