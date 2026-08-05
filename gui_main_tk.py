@@ -469,7 +469,7 @@ btn_clear_plot = ttk.Button(left, text="Clear Plot", command=clear_plot_action);
 ttk.Separator(left).grid(row=25, column=0, columnspan=2, sticky="ew", pady=(8,4))
 ttk.Label(left, text="Slip / Backlash (nm)").grid(row=26, column=0, sticky="w")
 _saved_settings = app_config.load()
-slip_nm_var = tk.StringVar(value=str(_saved_settings.get("backlash_slip_nm", 0.30)))
+slip_nm_var = tk.StringVar(value=str(_saved_settings.get("backlash_slip_nm", 0.082)))
 entry_slip_nm = ttk.Entry(left, textvariable=slip_nm_var, width=12); entry_slip_nm.grid(row=26, column=1, sticky="ew")
 
 def _on_slip_nm_edited(_event=None):

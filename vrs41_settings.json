@@ -1,5 +1,5 @@
 {
-  "backlash_slip_nm": 0.09074040411223905,
+  "backlash_slip_nm": 0.082,
   "last_current_nm": 588.7500000000002,
   "jog_step_nm": "0.5",
   "port": "SIM",
@@ -17,7 +17,7 @@
   "export_dir": "/root/scans",
   "export_pattern": "scan_{date}_{time}_{start}-{end}nm_{mode}.csv",
   "daq_dev": "Dev1",
-  "slip_nm": "0.09074040411223905",
+  "slip_nm": "0.082",
   "daq_ai": "ai1",
   "legend_font_px": 13
 }

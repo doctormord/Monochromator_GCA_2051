@@ -1419,7 +1419,7 @@ _panel_lay.addWidget(_sec_queue)
 # mechanical play. Their difference is the calibration error -- measurable, and
 # exactly what backlash_cal.py (the "Calibrate…" button) exists to reduce.
 _sec_bl = CollapsibleSection("BACKLASH")
-entry_slip = _line_edit(str(_saved_settings.get("backlash_slip_nm", 0.30)))
+entry_slip = _line_edit(str(_saved_settings.get("backlash_slip_nm", 0.082)))
 btn_reference_run = _btn("Reference Run")
 btn_calibrate = _btn("Calibrate…", "Primary")
 lbl_direction_state = QtWidgets.QLabel("Direction: unknown – run Reference Run first")

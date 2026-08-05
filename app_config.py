@@ -46,8 +46,12 @@ SETTINGS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)),
 DEFAULT_CONFIG = {
     # Mechanically measured backlash/slip in nm. Used on direction reversal
     # for compensation (see motion.reversal_compensation_steps).
-    # Default matches the value currently measured on the rig.
-    "backlash_slip_nm": 0.30,
+    # Default matches the value measured on the rig (see also
+    # device_constants.SIM_BACKLASH_NM, which mirrors the same measurement
+    # for the simulator). Corrected 2026-08-05: this default had drifted to
+    # 0.30, a stale/never-rig-verified value that predates the 0.082 nm
+    # measurement and did not match this comment's own claim.
+    "backlash_slip_nm": 0.082,
 
     # Last known software-tracked wavelength (nm). Restored into the
     # "Current λ" field at startup so a restart doesn't lose track of where

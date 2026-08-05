@@ -7,9 +7,10 @@
 > behoben, Defect C entschärft, Stop/GoTo-Race, vier Folgefehler aus dem
 > Selbst-Review, Slack-first-Modell, Begriffsvereinheitlichung
 > Slip → Backlash) + Doku-/Kommentar-Audit 2026-08-05 (reine Sprachqualität,
-> keine Verhaltensänderung — s. unten und `HISTORY.md`). **Fachlich alles
-> weiterhin NUR SIM-verifiziert, keine Rig-Session** — s. „AKTUELL" unten.
-> Chronologie aller Sessions: `HISTORY.md`.
+> keine Verhaltensänderung) + `slip_nm`-Korrektur 2026-08-05 (0.09074 nm
+> SIM-Leftover → 0.082 nm rig-gemessen, s. unten). **Fachlich alles weiterhin
+> NUR SIM-verifiziert, keine Rig-Session** — s. „AKTUELL" unten. Chronologie
+> aller Sessions: `HISTORY.md`.
 
 ## Rollenverteilung der Dokumente
 
@@ -113,7 +114,9 @@ markieren statt stillschweigend entfernen).
 - **Motion-Ramp aktiv:** `AC=50, DEC=100, SP=10000`. Vorher war `DEC` nie
   gesetzt und lief auf dem Geräte-Maximum (30000) → praktisch keine Bremsrampe.
   Mit `tune_ramp.py` gemessen, live getestet, bestätigt.
-- **Backlash/Slip:** ca. 0.09–0.20 nm.
+- **Backlash/Slip:** 0.082 nm (am Rig gemessen; die früher hier notierte
+  grobe Spanne „ca. 0.09–0.20 nm" war ein veralteter Vorabschätzwert und ist
+  durch die präzise Messung ersetzt, s. „AKTUELL" unten).
 - **Scan-Button-Lock** nach normalem Scan-Ende behoben (`scan_worker` rief den
   Reset-Hook nie auf).
 - **`entry_current`-Desync** behoben (`backlash_cal`/`reference_run_action`
@@ -217,9 +220,16 @@ Bookkeeping-Arithmetik, nicht reales Motor-/Serial-Timing oder die
   kompensations-bereinigte Encoder-Position nach GoTo/Scan-Ende ergänzt
   (Muster wie `free_run_worker`), bewusst NICHT `comp` blind ins Label
   addiert. Für exakt erreichte Moves ist das mathematisch ein No-Op — kann
-  eine `slip_nm`-Fehlkalibrierung strukturell nicht beseitigen. Der
-  eigentliche nächste Schritt ist eine Rig-Kalibrierprüfung
-  (`backlash_cal.py`), kein weiterer Code. Details/Herleitung in `CONTEXT.md`.
+  eine `slip_nm`-Fehlkalibrierung strukturell nicht beseitigen.
+  **Korrektur 2026-08-05:** die vermutete Kalibrierabweichung war keine —
+  `slip_nm` in `vrs41_settings.json` stand noch auf 0.09074 nm, einem
+  SIM-Session-Leftover, während der Nutzer den echten Backlash am Gerät
+  bereits vor längerer Zeit zu 0.082 nm vermessen hatte (derselbe Wert, der
+  in `device_constants.SIM_BACKLASH_NM` seit Erstrelease steht). `slip_nm`
+  ist jetzt in den Settings und im Code-Default auf 0.082 nm korrigiert.
+  Offener nächster Schritt ist nur noch die Rig-Verifikation, ob der reale
+  Offset dadurch verschwindet — kein weiterer Kalibrierschritt. Details/
+  Herleitung in `CONTEXT.md`.
 
 ## AKTUELL: Wellenlängen-Offset ~0.07 nm zwischen Scan-Gruppen
 
@@ -228,9 +238,11 @@ gefixt (s. Abschnitt oben) — **Rig-Session steht noch aus.** Details,
 Hypothesen und Testprotokoll in `CONTEXT.md`; Checkliste in `BACKLOG.md` (P0).
 
 Kurzfassung des Ausgangsbefunds: Scans derselben Linie sind innerhalb einer
-Gruppe deckungsgleich, zwischen Gruppen starr um ~0.07 nm verschoben (Slip ≈
-0.09 nm laut Settings). Avg-Fenster, Thermodrift, Backlash-Streuung,
-RC-Zeitkonstanten und mechanische Relaxation sind ausgeschlossen.
+Gruppe deckungsgleich, zwischen Gruppen starr um ~0.07 nm verschoben (1 Slip
+= 0.082 nm laut Rig-Messung, s. „Rig-bestätigter Stand" oben — nicht mehr
+0.09 nm, das war der veraltete Settings-Wert). Avg-Fenster, Thermodrift,
+Backlash-Streuung, RC-Zeitkonstanten und mechanische Relaxation sind
+ausgeschlossen.
 
 Diagnose-Patch `stage1_diag.patch` ist weiterhin **angewendet** (in
 `scan_engine.py` verifiziert: 3 Hunks, additiv, `try/except: pass`,
@@ -243,12 +255,14 @@ nützlich.
 
 Rig-Session: T3/T4 aus `CONTEXT.md` fahren (sollten nach dem A/B/Race-Fix
 keinen bleibenden Offset mehr zeigen bzw. sofort statt erst nach vollem
-Timeout abbrechen), `slip_nm` gegen den echten Backlash verifizieren
-(`backlash_cal.py` — das ist der Schritt, der Defect C tatsächlich schließt,
-kein weiterer Code), dann TESTPLAN.md Section 3c (10 gequeute Scans) als
-Abschlussbestätigung. Falls T3/T4 am Rig doch noch einen Offset zeigen: der
-SIM-Fix war unvollständig, zurück zu `CONTEXT.md`. Alt (weiterhin gültig als
-Referenz für die Auswertung, falls die Rig-Session neue `[DIAG]`-Daten
-braucht): `[DIAG]`-Zeilen gegen die Entscheidungstabelle in `CONTEXT.md`
-auswerten. Danach ggf. weitere Fixes schreiben — für den Defekt,
-den die Daten tatsächlich belasten.
+Timeout abbrechen), dann TESTPLAN.md Section 3c (10 gequeute Scans) als
+Abschlussbestätigung. `slip_nm` selbst ist **nicht mehr** offen — es stand
+auf einem SIM-Session-Leftover (0.09074 nm) statt auf dem seit längerem
+rig-gemessenen Backlash (0.082 nm) und ist am 2026-08-05 korrigiert (s.
+„SIM-bestätigter Stand" oben); ein erneuter `backlash_cal.py`-Lauf ist dafür
+nicht nötig, kann aber zur Bestätigung mitlaufen. Falls T3/T4 am Rig doch
+noch einen Offset zeigen: der SIM-Fix war unvollständig, zurück zu
+`CONTEXT.md`. Alt (weiterhin gültig als Referenz für die Auswertung, falls
+die Rig-Session neue `[DIAG]`-Daten braucht): `[DIAG]`-Zeilen gegen die
+Entscheidungstabelle in `CONTEXT.md` auswerten. Danach ggf. weitere Fixes
+schreiben — für den Defekt, den die Daten tatsächlich belasten.

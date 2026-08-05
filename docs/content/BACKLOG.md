@@ -1,8 +1,9 @@
 # BACKLOG — VRS41
 
 > Lebendes Dokument. Überschreiben, nicht anhäufen. Priorität: P0 = jetzt, P3 = später.
-> Stand: 2026-08-05. SIM-Diagnose- und Fix-Session (04.08.) sowie ein reines
-> Doku-/Kommentar-Audit (05.08., keine Verhaltensänderung) eingearbeitet.
+> Stand: 2026-08-05. SIM-Diagnose- und Fix-Session (04.08.), ein reines
+> Doku-/Kommentar-Audit (05.08. früh, keine Verhaltensänderung) sowie die
+> `slip_nm`-Korrektur (05.08., s. Defect C) eingearbeitet.
 >
 > **Diese Datei ist die Aufgabenliste.** Beobachtung, Ausschlussbegründungen,
 > Hypothesentabelle, Messansatz und Testprotokoll zum P0-Thema stehen in
@@ -80,9 +81,18 @@ mechanische Relaxation sind als Ursache ausgeschlossen (Begründungen in
       dieser Re-Anchor mathematisch ein No-Op — er kann eine
       `slip_nm`-Fehlkalibrierung strukturell **nicht** beseitigen, dafür
       fehlt eine unabhängige optische Rückmeldung auf echter Hardware.
-      **Der eigentliche nächste Schritt ist kein Code-Fix mehr:** `slip_nm`
-      am Rig gegen den echten Backlash verifizieren/kalibrieren
-      (`backlash_cal.py`).
+      **Korrektur 2026-08-05:** die `slip_nm`-Fehlkalibrierung, die diesen
+      Punkt motivierte, war kein offener Kalibrierbedarf, sondern ein
+      stehen gebliebener SIM-Wert (0.09074 nm, aus einem Speicherstand mit
+      `"port": "SIM"`) in `vrs41_settings.json`. Der Nutzer hat den echten
+      Backlash am Gerät bereits vor längerer Zeit zu 0.082 nm vermessen —
+      genau der Wert, den `device_constants.SIM_BACKLASH_NM` seit dem
+      Erstrelease trägt. `slip_nm`/`backlash_slip_nm` jetzt in
+      `vrs41_settings.json` UND im Code-Default (`app_config.DEFAULT_CONFIG`,
+      vorher fälschlich `0.30` trotz gegenteiligem Kommentar) auf `0.082`
+      korrigiert. **Offen bleibt nur noch die Rig-Verifikation**, ob der
+      reale ~0.07 nm-Offset dadurch verschwindet — kein Kalibrier-Schritt
+      mehr, s. `CONTEXT.md`.
 
 ### Nachtrag 2026-08-04 (Selbst-Review der obigen Fixes)
 
@@ -159,8 +169,10 @@ abgebrochenen Reversal-GoTo `label − optische Wahrheit = −0.00874 nm` — da
 ist auf die Stelle genau `slip_konfiguriert (0.09074) − backlash_real
 (0.082)`. Damit ist die Defect-C-Herleitung (Fehler skaliert mit der
 Kalibrierabweichung, nicht mit dem Backlash selbst) erstmals quantitativ
-bestätigt, und es zeigt direkt, was eine `slip_nm`-Kalibrierung am Rig
-bringen würde.
+bestätigt. **Nachtrag 2026-08-05:** die 0.09074 nm waren kein Rig-Wert,
+sondern ein SIM-Session-Leftover; `slip_nm` ist jetzt auf den rig-gemessenen
+Backlash 0.082 nm korrigiert (s. Defect-C-Punkt oben), womit diese
+Kalibrierabweichung im Code geschlossen ist.
 
 ### Arbeitsschritte
 
@@ -175,8 +187,13 @@ bringen würde.
             keinen bleibenden Offset mehr zeigen bzw. sofort (nicht erst nach
             vollem Timeout) abbrechen. Falls doch: SIM-Fix am Rig unvollständig,
             zurück zu `CONTEXT.md`.
-      - [ ] `slip_nm` gegen echten Backlash verifizieren (`backlash_cal.py`) —
-            das ist der Schritt, der Defect C tatsächlich schließt.
+      - [x] `slip_nm` gegen echten Backlash verifizieren — **erledigt
+            2026-08-05**, aber nicht durch eine neue `backlash_cal.py`-Fahrt:
+            der echte Backlash war dem Nutzer bereits seit längerem als
+            0.082 nm bekannt, `slip_nm` in `vrs41_settings.json` war nur ein
+            stehen gebliebener SIM-Wert (0.09074 nm) und ist jetzt korrigiert.
+            **Rig-Verifikation bleibt offen:** ob der reale ~0.07 nm-Offset
+            dadurch tatsächlich verschwindet, zeigt erst T3/T4 am Gerät.
       - [ ] TESTPLAN.md Section 3c (10 gequeute Scans) — Ergebnis muss "kein
             monotoner Trend" zeigen.
       - [ ] SIM-Smoke-Test vor der Rig-Session zur Kontrolle erneut laufen

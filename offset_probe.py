@@ -5,7 +5,8 @@ WHAT THIS SCRIPT IS FOR
 -----------------------
 At the rig, groups of otherwise identical scans of the same line came out
 mutually congruent WITHIN a group but rigidly shifted BETWEEN groups by
-roughly 0.07 nm -- about one Slip (0.080 nm). The group boundary coincided
+roughly 0.07 nm -- about one Slip (0.082 nm, the rig-measured value -- see
+device_constants.SIM_BACKLASH_NM). The group boundary coincided
 with an Avg-fraction change, but a static test showed the optics do not creep
 while standing still, so the averaging window cannot be the cause: measurement
 DURATION can only matter if something MOVES during the measurement.
@@ -76,7 +77,7 @@ USAGE
 
     # the real thing
     python offset_probe.py COM3 --center 587.80 --span 0.40 --step 0.01 \
-        --timebase-ms 300 --presettle-ms 50 --slip-nm 0.080 \
+        --timebase-ms 300 --presettle-ms 50 --slip-nm 0.082 \
         --outdir probe_2026-07-30
 
 Outputs into --outdir:
@@ -828,8 +829,12 @@ def main():
     ap.add_argument("--avg-samples-b", type=int, default=10)
     ap.add_argument("--avg-fraction-b", type=float, default=50.0,
                     help="Fraction for the SECOND group (the rig used 50 %%)")
-    ap.add_argument("--slip-nm", type=float, default=0.080,
-                    help="Backlash used for compensation. 0 disables it.")
+    ap.add_argument("--slip-nm", type=float, default=0.082,
+                    help="Backlash used for compensation. 0 disables it. "
+                         "Default is the rig-measured value (see "
+                         "device_constants.SIM_BACKLASH_NM); pass the current "
+                         "GUI Backlash field value if it has since been "
+                         "recalibrated.")
     ap.add_argument("--no-compensation", action="store_true",
                     help="Force compensation off regardless of --slip-nm "
                          "(this is test T2 in the report)")

@@ -1,13 +1,16 @@
 # CONTEXT.md — VRS41: technischer Tiefgang
 
 > Verdichtung aus mehreren Chat-Exports + HANDOVER/BACKLOG/HANDOFF-Ständen.
-> Stand: 2026-08-05 (Doku-/Kommentar-Audit eingearbeitet — reine
-> Sprach-/Kommentarqualität in den `.py`-Dateien, KEINE Änderung am
-> Diagnosestand oder an der Codelogik, s. `HISTORY.md`. Inhaltlich weiterhin
-> die SIM-Diagnose- und Fix-Session vom 2026-08-04: Defect A/B code-seitig
-> behoben und in SIM verifiziert, Defect C mit Re-Anchor entschärft, ein
-> vierter Fund (Stop/GoTo-Race) dabei entdeckt und ebenfalls behoben. Alles
-> NUR in SIM verifiziert — Rig-Session steht noch aus).
+> Stand: 2026-08-05 (SIM-Diagnose- und Fix-Session vom 2026-08-04
+> eingearbeitet — Defect A/B code-seitig behoben und in SIM verifiziert,
+> Defect C mit Re-Anchor entschärft, ein vierter Fund (Stop/GoTo-Race) dabei
+> entdeckt und ebenfalls behoben. Alles NUR in SIM verifiziert — Rig-Session
+> steht noch aus. Dazu zwei weitere 05.08.-Durchgänge: ein reines
+> Doku-/Kommentar-Audit — Sprach-/Kommentarqualität in den `.py`-Dateien,
+> KEINE Änderung am Diagnosestand oder an der Codelogik — und die
+> `slip_nm`-Korrektur (0.09074 nm, ein SIM-Session-Leftover, auf den
+> rig-gemessenen Wert 0.082 nm, s. Defect-C-Abschnitt). Details zu allen
+> dreien in `HISTORY.md`).
 >
 > **Abgrenzung:** Architektur und rig-bestätigter Stand stehen in `HANDOVER.md`,
 > die Aufgabenliste in `BACKLOG.md`. Hier steht nur, was zum *Verstehen* der
@@ -20,7 +23,7 @@
 |---|---|
 | 1 nm | 361 765 |
 | Scan-Schritt 0.01 nm | 3 618 |
-| 1 Slip (0.080 nm) | 28 941 |
+| 1 Slip (0.082 nm) | 29 665 |
 | beobachteter Offset (~0.07 nm) | ~25 300 |
 | `POS_TOL_STEPS` (Ankunftstoleranz) | 90 (≈ 0.25 pm) |
 
@@ -135,9 +138,27 @@ Reversal-GoTo `label − optische Wahrheit = −0.00874 nm`. Das ist exakt
 `slip_konfiguriert (0.09074 nm) − backlash_real (SIM_BACKLASH_NM = 0.082 nm)`.
 Der Fehler skaliert also tatsächlich mit der **Kalibrierabweichung**, nicht
 mit dem Backlash — die vorher nur algebraisch hergeleitete Aussage ist damit
-gemessen. Praktische Folge: der verbleibende Offset lässt sich ausschließlich
-über eine `slip_nm`-Kalibrierung am Rig (`backlash_cal.py`) verkleinern, nicht
-über weiteren Code.
+gemessen.
+
+**Korrektur (2026-08-05): die 0.09074 nm waren keine Rig-Kalibrierung,
+sondern ein SIM-Session-Leftover.** Der Nutzer hat den echten Backlash am
+Gerät bereits vor längerer Zeit zu **0.082 nm** vermessen — genau der Wert,
+den `device_constants.SIM_BACKLASH_NM` seit dem allerersten Release
+(2026-07-22) trägt, mit dem Kommentar „the value measured on the rig". Die
+0.09074 nm in `vrs41_settings.json` stammten dagegen aus einem Speicherstand
+mit `"port": "SIM"` (git-Historie geprüft) — also aus einer Simulator-Session,
+nicht aus einer echten Kalibrierfahrt. Die oben gemessene
+„Kalibrierabweichung" von 0.00874 nm war damit ein Artefakt eines stehen
+gebliebenen SIM-Werts, keine offene Kalibrieraufgabe. `slip_nm`/
+`backlash_slip_nm` ist jetzt in `vrs41_settings.json` (und in den
+Code-Defaults, `app_config.DEFAULT_CONFIG`) auf `0.082` korrigiert — damit
+sollte `sim_defect_probe.py` Section 3 auf `±0.00000 nm` fallen (No-Op wie
+Section 4), analog zur bereits bestätigten Section 4. Der verbleibende
+~0.07 nm-Offset lässt sich damit **nicht mehr** über eine weitere
+`slip_nm`-Kalibrierung angehen — der einzig offene Hebel für Defect C ist
+jetzt die Rig-Verifikation, ob der reale Offset dadurch tatsächlich
+verschwindet (H1-Rest, s. Hypothesentabelle unten), nicht mehr eine
+Kalibrierabweichung im Code.
 
 **Zwei Modell-/Schwellenfehler aus dem Review, ebenfalls behoben:** (1) die
 Log-Schwelle der Erfolgs-Re-Anchors lag mit `1e-4` nm unter der
@@ -202,10 +223,17 @@ No-Op (bestätigt in SIM). Er fängt echte `POS_TOL_STEPS`-Anlauf-Toleranz ab
 und dient als Verifikations-/Log-Sicherheitsnetz, kann aber eine
 `slip_nm`-Fehlkalibrierung strukturell **nicht** beseitigen — dafür gibt es
 auf echter Hardware keine unabhängige optische Rückmeldung (kein
-Absolutsensor, s. „Zwei Eigenschaften" in HANDOVER.md). Der real am Rig
-beobachtete ~0.07 nm-Offset kann also NUR über eine Rig-Kalibrierprüfung von
-`slip_nm` (`backlash_cal.py`, gegen den echten Backlash) weiter reduziert
-werden — das ist der eigentliche nächste Schritt für C, kein Code-Fix mehr.
+Absolutsensor, s. „Zwei Eigenschaften" in HANDOVER.md).
+
+**Korrektur (2026-08-05):** `slip_nm` ist jetzt auf 0.082 nm korrigiert (s.
+Kasten oben) — der rig-gemessene Backlash-Wert des Nutzers, nicht mehr das
+SIM-Session-Leftover 0.09074 nm. Die Kalibrierabweichung, die diesen Absatz
+ursprünglich motivierte, existiert damit im Code nicht mehr. Der real am Rig
+beobachtete ~0.07 nm-Offset kann jetzt **nicht mehr** über eine weitere
+`slip_nm`-Kalibrierung reduziert werden — offen bleibt nur noch die
+Rig-Verifikation, ob der reale Offset dadurch tatsächlich verschwindet
+(s. H1 unten), oder ob ein mechanischer/Timing-Anteil übrig bleibt, den nur
+ein Rig-Test zeigen kann.
 
 Korroboration aus dem Code selbst: der Free-Run-Fix-Kommentar nennt
 `587.000 → 586.918 nm` = **0.082 nm** = 1 Slip. Dieselbe Fehlerklasse gab es in
@@ -227,7 +255,7 @@ das bräuchte einen optischen Test.
 
 | # | These | Signatur | Falsifikation | Code-Status |
 |---|---|---|---|---|
-| H1 | Defect C: Komp. im Ziel, nicht im Label | Offset = exakt 1 Slip; weg bei Slip=0 | T2 | Re-Anchor ergänzt, Rest ist Kalibriersache (s. oben) |
+| H1 | Defect C: Komp. im Ziel, nicht im Label | Offset = exakt 1 Slip; weg bei Slip=0 | T2 | Re-Anchor ergänzt, `slip_nm`-Kalibrierabweichung seit 2026-08-05 behoben (s. oben) — Rest ist reine Rig-Verifikation |
 | H2 | Defect A: Abbruch vergiftet Ursprung | Offset nach Abbruch, **bleibt**; Betrag = Auslaufstrecke, nicht Slip | T3 | Behoben (SIM) |
 | H3 | Jog kippt `last_move_direction` | Offset nach Jog, bleibt | T1 | Unverändert — Jog ist ein Go To, profitiert vom B-Fix |
 | H4 | echte optische Bewegung | Offset auch im **Encoder**-Frame | Diag-Patch | Kann `sim_hardware` naturgemäß nicht ausschließen — Rig-Frage |
@@ -238,7 +266,9 @@ Unterschieden werden sie über den **Auslöser** und darüber, **ob der Betrag
 gleich dem Slip ist**. Da A und B jetzt code-seitig behoben sind, dient die
 ausstehende Rig-Session nicht mehr primär der Unterscheidung, sondern der
 **Verifikation**, dass der reale ~0.07 nm-Offset dadurch tatsächlich
-verschwindet bzw. sich auf die `slip_nm`-Kalibrierabweichung reduziert (H1-Rest).
+verschwindet. Die `slip_nm`-Kalibrierabweichung selbst ist seit 2026-08-05
+kein offener Punkt mehr (s. oben) — H1-Rest ist jetzt nur noch die Frage, ob
+nach der Korrektur überhaupt noch etwas übrig bleibt.
 
 ### Entscheidender Messansatz
 
@@ -265,7 +295,8 @@ springt argmax zwischen Nachbarpunkten (10 pm Eigenrauschen auf 70 pm Effekt).
 **Erwartete Signatur falls H1 stimmt:** `slack` bleibt scanweit 0 (Richtung dreht
 innerhalb eines Scans nie) · `[SLIP]`-Zeile erscheint vor der einen Gruppe, vor
 der anderen nicht (kommt vom Sprung-zum-Start, nicht aus der Scan-Schleife) ·
-`pos` am Peak differiert um ~28 941 Schritte · `label_nm` am Peak **identisch**.
+`pos` am Peak differiert um ~29 665 Schritte (1 Slip = 0.082 nm) · `label_nm`
+am Peak **identisch**.
 
 ### Testprotokoll — jetzt Fix-Verifikation (T3/T4 sollten nach dem A/B-Fix negativ ausfallen)
 

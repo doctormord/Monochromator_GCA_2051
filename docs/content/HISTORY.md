@@ -1005,3 +1005,89 @@ sonst inhaltlich unverändert (keine neuen Diagnosebefunde diese Session).
 Lokal committet, auf Nutzerwunsch nach `origin/testing` gepusht
 (Fast-Forward, da `origin/testing` seit dem Branchen dieser Session nicht
 weitergelaufen war).
+
+## 2026-08-05
+
+`slip_nm`-Fehlkalibrierung korrigiert (0.09074 nm → 0.082 nm) und die daran
+hängenden Doku-Aussagen bereinigt.
+
+**Auslöser:** Nutzerfrage, was in den `.md`-Dateien zur `slip_nm`-Kalibrierung
+steht — mit dem Hinweis, der echte Backlash sei am Gerät bereits vor
+längerer Zeit zu 0.082 nm vermessen worden und die Docs würden diesen Wert
+offenbar nicht widerspiegeln.
+
+**Befund.** `vrs41_settings.json` trug `backlash_slip_nm`/`slip_nm` =
+0.09074040411223905 — der Wert, den `CONTEXT.md`/`BACKLOG.md`/`HANDOVER.md`
+seit der SIM-Diagnose-Session vom 2026-08-04 als „konfigurierten Slip"
+zitieren und gegen den gemessenen `SIM_BACKLASH_NM` = 0.082 nm als offene
+**Kalibrierabweichung** (0.00874 nm) verbuchten — mit der Schlussfolgerung,
+der nächste Schritt sei eine `slip_nm`-Kalibrierung am Rig. Git-Historie von
+`vrs41_settings.json` zeigt: der Speicherstand mit diesem Wert hatte
+`"port": "SIM"` — die 0.09074 nm stammen also aus einer Simulator-Session,
+nicht aus einer echten Kalibrierfahrt. `device_constants.py` trägt seit dem
+Erstrelease (2026-07-22, Commit `590a8ad`) den Kommentar „0.082 nm is the
+value measured on the rig" für `SIM_BACKLASH_NM` — dieser Fakt war also die
+ganze Zeit im Code vorhanden, wurde aber nie in die laufende `slip_nm`-Kette
+zurückgespielt. `MANUAL.md` bestätigt 0.082 nm zusätzlich unabhängig: die
+Beispiel-Logzeile für `[SLIP] Reversal ...` nennt exakt `0.082 nm
+(+29665 steps)`.
+
+**Weitere Funde derselben Fehlerklasse, ebenfalls korrigiert:**
+- `app_config.DEFAULT_CONFIG["backlash_slip_nm"]` stand auf `0.30`, obwohl
+  der eigene Kommentar direkt daneben behauptet „Default matches the value
+  currently measured on the rig". Trivialer, aber genau diese Art
+  Kommentar/Wert-Widerspruch. Auf `0.082` korrigiert; dieselbe hartkodierte
+  `0.30`-Fallback-Instanz in `gui_main.py`/`gui_main_tk.py` (dort nur
+  zweite Verteidigungslinie hinter `app_config`, praktisch nie erreicht)
+  ebenfalls auf `0.082` gezogen, um keine dritte inkonsistente Kopie stehen
+  zu lassen.
+- `CONTEXT.md`, Skalen-Tabelle: Zeile „1 Slip (0.080 nm) | 28 941" — ein
+  drittes, wieder anderes Zahlenpaar für dieselbe Größe. Auf 0.082 nm /
+  29 665 Schritte korrigiert (0.082 × `STEPS_PER_NM` = 361 765 → 29 664.73).
+- `HANDOVER.md`, „Rig-bestätigter Stand": „Backlash/Slip: ca. 0.09–0.20 nm" —
+  eine grobe Vorab-Spanne, unter „nicht mehr offen" einsortiert, obwohl der
+  präzise Wert (0.082 nm) an anderer Stelle im selben Ökosystem längst bekannt
+  war. Ersetzt durch den präzisen Wert mit Verweis auf die Quelle.
+
+**Nicht angetastet:** die historischen Messprotokolle in `CONTEXT.md`/
+`BACKLOG.md`/`HISTORY.md` (z.B. „Section 3 −0.00874 nm", „label − optische
+Wahrheit = −0.00874 nm"), die unter der damals aktiven Fehlkonfiguration
+tatsächlich so gemessen wurden — das sind korrekte Aufzeichnungen eines
+Zustands, kein Fehler. Nur die daraus gezogene *Handlungsempfehlung*
+(„braucht noch eine Rig-Kalibrierung") wurde als überholt markiert.
+`sim_defect_probe.py`s Kopf-Docstring (nennt 0.09074 als „configured slip")
+ebenfalls nicht angefasst — dokumentiert einen konkreten historischen
+Messlauf, kein aktueller Konfigurationswert.
+
+**Umgesetzt:**
+- `vrs41_settings.json`: `backlash_slip_nm`/`slip_nm` auf `0.082`.
+- `app_config.py`: `DEFAULT_CONFIG["backlash_slip_nm"]` auf `0.082`,
+  Kommentar ergänzt (Herkunft/Historie des falschen `0.30`-Defaults).
+- `gui_main.py`/`gui_main_tk.py`: Fallback-Literal `0.30` → `0.082`.
+- `CONTEXT.md`, `BACKLOG.md`, `HANDOVER.md`: alle Stellen korrigiert, die die
+  0.09074-nm-Kalibrierabweichung als offene Aufgabe führten; Skalen-Tabelle
+  und Backlash-Spanne vereinheitlicht auf 0.082 nm; „Nächster Schritt"
+  entsprechend umformuliert — offen bleibt nur noch die Rig-Verifikation,
+  dass der reale ~0.07 nm-Offset nach der Korrektur tatsächlich verschwindet
+  (T3/T4 aus `CONTEXT.md`), nicht mehr die `slip_nm`-Kalibrierung selbst.
+
+**Verifikation:** `py_compile` über alle geänderten `.py`-Dateien;
+`vrs41_settings.json` mit `json.load` auf Syntaxgültigkeit geprüft;
+SIM-Smoke-Test (Connect → Reference Run → Scan → sauberes Ende) unter
+`QT_QPA_PLATFORM=offscreen` gefahren, GUI zeigt „Backlash (nm)" = 0.082 nach
+Start. Keine funktionale Code-Änderung außer den drei genannten
+Default-/Settings-Werten — Defect A/B/C-Logik selbst unverändert.
+
+Zusätzlich empirisch mit `sim_defect_probe.py` bestätigt (Skript zeigt sonst
+auf den Original-Checkout statt den Bearbeitungsstand, `REPO`-Konstante dafür
+nur temporär umgebogen, Änderung danach wieder verworfen): mit `slip_nm =
+0.082` fällt Section 3 (abgebrochener Reversal-GoTo) von vorher
+`label − optische Wahrheit = −0.00874 nm` auf **`+0.00000 nm`** — exakt der
+Wert, den die Herleitung oben vorhersagt (`slip_konfiguriert − backlash_real
+= 0.082 − 0.082 = 0`). Damit ist nicht nur die Doku korrigiert, sondern auch
+gemessen bestätigt, dass die Kalibrierabweichung im Code jetzt tatsächlich
+null ist, nicht nur behauptet.
+
+**Offen:** die Rig-Session (T3/T4 aus `CONTEXT.md`, danach TESTPLAN.md
+Section 3c) bleibt der nächste Schritt für P0 — nur ihr Zweck hat sich
+verschoben, von „Kalibrierung nachholen" zu „Fix verifizieren".
